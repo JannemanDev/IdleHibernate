@@ -1,0 +1,9 @@
+﻿{
+    "checkNet":  true,
+    "minQuietRatio":  0.9,
+    "diskBusyPercent":  20,
+    "checkCpu":  true,
+    "cpuBusyPercent":  30,
+    "netBusyKBps":  500,
+    "checkDisk":  true
+}
