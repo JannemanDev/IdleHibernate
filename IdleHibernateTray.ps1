@@ -65,12 +65,11 @@ if (-not $owned) { exit 0 }
 
 $script:flagDir = Join-Path $env:LOCALAPPDATA "IdleHibernate"
 $script:flagPath = Join-Path $script:flagDir "paused"
-$script:settingsPath = Join-Path $script:flagDir "settings.json"
+$script:AppVersion = "1.1.1"
 $script:keepMenuOpen = $false
 $script:idleActionArmed = $false
 $script:debugSavedThisIdle = $false
 $script:uiReady = $false
-$script:AppVersion = "1.0.11"
 $script:SourceFileNames = @("Common.ps1", "IdleHibernateTray.ps1", "StartTray.vbs")
 
 $script:state = [ordered]@{
@@ -98,34 +97,21 @@ function Set-Paused([bool]$paused) {
 }
 
 function Read-Settings {
-    if (Test-Path -LiteralPath $script:settingsPath) {
-        try {
-            $s = Get-Content -LiteralPath $script:settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $script:state.idleSeconds = Get-IdleSecondsFromSettings -Settings $s
-            if ($null -ne $s.requireQuiet) { $script:state.requireQuiet = [bool]$s.requireQuiet }
-            $script:state.powerSources = @(Get-SelectedPowerSources -Settings $s)
-            $script:state.networkProfiles = @(Convert-ToStringArray $s.networkProfiles)
-            $script:state.action = Get-NormalizedAction -Settings $s
-        }
-        catch { }
+    $s = $null
+    try { $s = Read-AppSettingsFile } catch { }
+    if ($s) {
+        $choice = Get-ChosenSettings -Settings $s
+        $script:state.idleSeconds = Get-IdleSecondsFromSettings -Settings $choice
+        if ($null -ne $choice.requireQuiet) { $script:state.requireQuiet = [bool]$choice.requireQuiet }
+        $script:state.powerSources = @(Get-SelectedPowerSources -Settings $choice)
+        $script:state.networkProfiles = @(Convert-ToStringArray $choice.networkProfiles)
+        $script:state.action = Get-NormalizedAction -Settings $choice
     }
     $script:state.idleSeconds = Get-IdleSecondsFromSettings -Settings $script:state
 }
 
 function Save-Settings {
-    if (-not (Test-Path -LiteralPath $script:flagDir)) {
-        New-Item -ItemType Directory -Path $script:flagDir -Force | Out-Null
-    }
-    $sec = Get-IdleSecondsFromSettings -Settings $script:state
-    $json = @{
-        idleSeconds     = $sec
-        idleMinutes     = [math]::Max(1, [int][math]::Ceiling($sec / 60.0))
-        requireQuiet    = [bool]$script:state.requireQuiet
-        powerSources    = @($script:state.powerSources)
-        networkProfiles = @($script:state.networkProfiles)
-        action          = Get-NormalizedAction -Settings $script:state
-    } | ConvertTo-Json
-    Set-Content -LiteralPath $script:settingsPath -Value $json -Encoding UTF8
+    Write-AppSettingsFile -State $script:state
 }
 
 function Get-AppSourceHash {
@@ -244,8 +230,11 @@ function Update-Tray {
     $script:powerDcItem.Checked = ($power -contains "DC")
     $script:powerMenu.Checked = ($power.Count -gt 0)
     $selected = @($script:state.networkProfiles)
-    $script:homeNetItem.Checked = ($selected -contains "Home")
-    $script:workNetItem.Checked = ($selected -contains "Work")
+    if ($script:netProfileItems) {
+        foreach ($name in @($script:netProfileItems.Keys)) {
+            $script:netProfileItems[$name].Checked = ($selected -contains $name)
+        }
+    }
     $script:netMenu.Checked = ($selected.Count -gt 0)
     $isSleep = ((Get-NormalizedAction -Settings $script:state) -eq "sleep")
     $script:actionHibernateItem.Checked = -not $isSleep
@@ -303,7 +292,7 @@ function Get-IdleTimerMenuText {
 function Update-ResetReasonDisplay([int]$left) {
     if (-not $script:resetReasonItem) { return }
     if (Test-Paused) {
-        $script:resetReasonItem.Text = "Reset: -"
+        $script:resetReasonItem.Text = "Reset reason: -"
         return
     }
     $need = Get-IdleSecondsFromSettings -Settings $script:state
@@ -322,10 +311,10 @@ function Update-ResetReasonDisplay([int]$left) {
         $reason = $script:shownResetReason
     }
     if ($show -and $reason) {
-        $script:resetReasonItem.Text = "Reset: $reason"
+        $script:resetReasonItem.Text = "Reset reason: $reason"
     }
     else {
-        $script:resetReasonItem.Text = "Reset: -"
+        $script:resetReasonItem.Text = "Reset reason: -"
     }
     $script:prevRemainingSec = $left
 }
@@ -373,7 +362,7 @@ function Update-RemainingDisplay {
         if ($script:idleLabel) {
             $script:idleLabel.Text = Get-IdleTimerMenuText -Left 0
         }
-        if ($script:resetReasonItem) { $script:resetReasonItem.Text = "Reset: -" }
+        if ($script:resetReasonItem) { $script:resetReasonItem.Text = "Reset reason: -" }
         Update-QuietLimitLabels
         Invoke-IdleTimeoutIfNeeded
         return
@@ -469,7 +458,7 @@ $script:pauseItem.Add_Click({ Toggle-Paused })
 
 $script:idleLabel = New-Object System.Windows.Forms.ToolStripMenuItem "Idle timer: 10 min"
 $script:idleLabel.Enabled = $false
-$script:resetReasonItem = New-Object System.Windows.Forms.ToolStripMenuItem "Reset: -"
+$script:resetReasonItem = New-Object System.Windows.Forms.ToolStripMenuItem "Reset reason: -"
 $script:resetReasonItem.Enabled = $false
 $script:prevRemainingSec = $null
 $script:shownResetReason = $null
@@ -539,15 +528,46 @@ function Update-PowerMenuStatus {
 }
 
 function Update-NetworkMenuStatus {
-    if (-not $script:homeNetItem) { return }
+    if (-not $script:netMenu) { return }
+    Rebuild-NetworkMenu
     $connected = @(Get-ConnectedNetworkNames)
     $selected = @($script:state.networkProfiles)
-    $script:homeNetItem.Checked = ($selected -contains "Home")
-    $script:workNetItem.Checked = ($selected -contains "Work")
     $script:netMenu.Checked = ($selected.Count -gt 0)
-    Set-LiveConditionColor $script:homeNetItem (Test-ProfileConnected -ProfileName "Home" -ConnectedNames $connected)
-    Set-LiveConditionColor $script:workNetItem (Test-ProfileConnected -ProfileName "Work" -ConnectedNames $connected)
+    if ($script:netProfileItems) {
+        foreach ($name in @($script:netProfileItems.Keys)) {
+            $item = $script:netProfileItems[$name]
+            $item.Checked = ($selected -contains $name)
+            $item.Text = Get-NetworkProfileMenuLabel $name
+            Set-LiveConditionColor $item (Test-ProfileConnected -ProfileName $name -ConnectedNames $connected)
+        }
+    }
     Set-LiveConditionColor $script:netMenu (Test-SelectedNetworksAllowed -Settings $script:state)
+}
+
+function Rebuild-NetworkMenu {
+    if (-not $script:netMenu) { return }
+    if (-not $script:netProfileItems) {
+        $script:netProfileItems = @{}
+    }
+    $script:netMenu.DropDownItems.Clear()
+    $script:netProfileItems.Clear()
+    foreach ($name in @($script:NetworkProfileMap.Keys)) {
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem (Get-NetworkProfileMenuLabel $name)
+        $item.CheckOnClick = $true
+        $item.Tag = $name
+        $item.Add_Click({
+            param($sender, $e)
+            $script:keepMenuOpen = $true
+            $profileName = [string]$sender.Tag
+            if (-not $profileName) { $profileName = [string]$this.Tag }
+            Set-NetworkProfileEnabled $profileName $sender.Checked
+            Save-Settings
+            Update-Tray
+            Update-NetworkMenuStatus
+        })
+        $script:netProfileItems[$name] = $item
+        [void]$script:netMenu.DropDownItems.Add($item)
+    }
 }
 
 $script:powerMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Power"
@@ -596,12 +616,12 @@ $script:cpuLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Incr
 $script:cpuLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease CPU limit"
 $script:cpuLimitUp.Add_Click({
     $script:keepMenuOpen = $true
-    Set-QuietBusyLimit -Kind cpu -Delta 5
+    Set-QuietBusyLimit -Kind cpu -Delta 1
     Update-QuietLimitLabels
 })
 $script:cpuLimitDown.Add_Click({
     $script:keepMenuOpen = $true
-    Set-QuietBusyLimit -Kind cpu -Delta -5
+    Set-QuietBusyLimit -Kind cpu -Delta -1
     Update-QuietLimitLabels
 })
 $script:checkDiskItem = New-Object System.Windows.Forms.ToolStripMenuItem "Check disk"
@@ -617,12 +637,12 @@ $script:diskLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Inc
 $script:diskLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease disk limit"
 $script:diskLimitUp.Add_Click({
     $script:keepMenuOpen = $true
-    Set-QuietBusyLimit -Kind disk -Delta 5
+    Set-QuietBusyLimit -Kind disk -Delta 1
     Update-QuietLimitLabels
 })
 $script:diskLimitDown.Add_Click({
     $script:keepMenuOpen = $true
-    Set-QuietBusyLimit -Kind disk -Delta -5
+    Set-QuietBusyLimit -Kind disk -Delta -1
     Update-QuietLimitLabels
 })
 $script:checkNetItem = New-Object System.Windows.Forms.ToolStripMenuItem "Check network traffic"
@@ -638,12 +658,12 @@ $script:netLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Incr
 $script:netLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease net limit"
 $script:netLimitUp.Add_Click({
     $script:keepMenuOpen = $true
-    Set-QuietBusyLimit -Kind net -Delta 10
+    Set-QuietBusyLimit -Kind net -Delta 1
     Update-QuietLimitLabels
 })
 $script:netLimitDown.Add_Click({
     $script:keepMenuOpen = $true
-    Set-QuietBusyLimit -Kind net -Delta -10
+    Set-QuietBusyLimit -Kind net -Delta -1
     Update-QuietLimitLabels
 })
 [void]$script:quietMenu.DropDownItems.Add($script:quietItem)
@@ -673,26 +693,8 @@ $script:quietMenu.DropDown.Add_Opening({
 })
 
 $script:netMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Network"
-$script:homeNetItem = New-Object System.Windows.Forms.ToolStripMenuItem "Home (DeluxeRouter0)"
-$script:homeNetItem.CheckOnClick = $true
-$script:homeNetItem.Add_Click({
-    $script:keepMenuOpen = $true
-    Set-NetworkProfileEnabled "Home" $script:homeNetItem.Checked
-    Save-Settings
-    Update-Tray
-    Update-NetworkMenuStatus
-})
-$script:workNetItem = New-Object System.Windows.Forms.ToolStripMenuItem "Work (FontysWPA or Eduroam)"
-$script:workNetItem.CheckOnClick = $true
-$script:workNetItem.Add_Click({
-    $script:keepMenuOpen = $true
-    Set-NetworkProfileEnabled "Work" $script:workNetItem.Checked
-    Save-Settings
-    Update-Tray
-    Update-NetworkMenuStatus
-})
-[void]$script:netMenu.DropDownItems.Add($script:homeNetItem)
-[void]$script:netMenu.DropDownItems.Add($script:workNetItem)
+$script:netProfileItems = @{}
+Rebuild-NetworkMenu
 Enable-KeepSubmenuOpen $script:netMenu
 $script:netMenu.DropDown.Add_Opening({ Update-NetworkMenuStatus })
 
@@ -867,10 +869,80 @@ function Update-DebugMenu {
     }
 }
 
+function Show-SettingsFileWindow {
+    Save-Settings
+    $path = $script:SettingsPath
+    $text = ""
+    if (Test-Path -LiteralPath $path) {
+        $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+    }
+    if (-not $text) { $text = "(empty)" }
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Idle hibernate settings"
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $form.Size = New-Object System.Drawing.Size(560, 580)
+    $form.MinimizeBox = $false
+    $form.MaximizeBox = $true
+    $form.ShowInTaskbar = $false
+
+    $pathLabel = New-Object System.Windows.Forms.Label
+    $pathLabel.Text = $path
+    $pathLabel.Dock = [System.Windows.Forms.DockStyle]::Top
+    $pathLabel.Height = 28
+    $pathLabel.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 0)
+
+    $buttons = New-Object System.Windows.Forms.Panel
+    $buttons.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $buttons.Height = 44
+
+    $openBtn = New-Object System.Windows.Forms.Button
+    $openBtn.Text = "Open file"
+    $openBtn.Width = 100
+    $openBtn.Height = 28
+    $openBtn.Location = New-Object System.Drawing.Point(12, 8)
+    $openBtn.Add_Click({
+        Start-Process -FilePath "notepad.exe" -ArgumentList "`"$($script:SettingsPath)`""
+    })
+
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = "OK"
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $ok.Width = 88
+    $ok.Height = 28
+    $ok.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+
+    $buttons.Controls.Add($openBtn)
+    $buttons.Controls.Add($ok)
+    $form.Add_Shown({
+        $ok.Location = New-Object System.Drawing.Point(($buttons.ClientSize.Width - 100), 8)
+    })
+
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
+    $box.WordWrap = $false
+    $box.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $box.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $box.Text = $text
+
+    $form.Controls.Add($box)
+    $form.Controls.Add($buttons)
+    $form.Controls.Add($pathLabel)
+    $form.AcceptButton = $ok
+    [void]$form.ShowDialog()
+    $form.Dispose()
+    Read-Settings
+    Rebuild-NetworkMenu
+    Update-Tray
+}
+
 $script:versionItem = New-Object System.Windows.Forms.ToolStripMenuItem "Version $($script:AppVersion)"
 $script:versionItem.Enabled = $false
 $script:hashItem = New-Object System.Windows.Forms.ToolStripMenuItem "Source hash: --"
 $script:hashItem.Enabled = $false
+$script:settingsFileItem = New-Object System.Windows.Forms.ToolStripMenuItem "Show settings file"
+$script:settingsFileItem.Add_Click({ Show-SettingsFileWindow })
 
 $script:restartItem = New-Object System.Windows.Forms.ToolStripMenuItem "Restart tray icon"
 $script:restartItem.Add_Click({
@@ -905,6 +977,7 @@ $script:exitItem.Add_Click({
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$script:menu.Items.Add($script:versionItem)
 [void]$script:menu.Items.Add($script:hashItem)
+[void]$script:menu.Items.Add($script:settingsFileItem)
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$script:menu.Items.Add($script:restartItem)
 [void]$script:menu.Items.Add($script:exitItem)
@@ -922,6 +995,8 @@ $script:menu.Add_Opening({
         return
     }
     try {
+        Read-Settings
+        Rebuild-NetworkMenu
         Update-HistoryMenu
         Update-DebugMenu
         Update-RemainingDisplay

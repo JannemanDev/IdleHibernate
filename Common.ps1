@@ -1,8 +1,8 @@
 # Shared Home/Work SSID checks. ASCII-only. Dot-source from the tray.
 
 $script:NetworkProfileMap = [ordered]@{
-    Home = @("DeluxeRouter0")
-    Work = @("FontysWPA", "Eduroam")
+    Home = @("ExampleHomeSSID")
+    Work = @("ExampleWorkSSID")
 }
 
 if (-not ("PowerStateNative" -as [type])) {
@@ -28,7 +28,9 @@ public static class PowerStateNative {
 
 function Get-NormalizedAction {
     param($Settings)
-    $action = [string]$Settings.action
+    $choice = Get-ChosenSettings -Settings $Settings
+    $action = ""
+    if ($null -ne $choice) { $action = [string]$choice.action }
     if ($action.ToLowerInvariant() -eq "sleep") { return "sleep" }
     return "hibernate"
 }
@@ -54,18 +56,78 @@ $script:ScriptDir = $PSScriptRoot
 if (-not $script:ScriptDir -and $MyInvocation.MyCommand.Path) {
     $script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
+$script:DataDir = Join-Path $env:LOCALAPPDATA "IdleHibernate"
+$script:SettingsPath = Join-Path $script:ScriptDir "settings.json"
+$script:HistoryPath = Join-Path $script:DataDir "history.json"
+$script:DebugPath = Join-Path $script:DataDir "debug-last.json"
+$script:IdlePresets = $null
+$script:AppSettingsLoaded = $false
+$script:JsoncLineComments = [ordered]@{
+    powerSources = "AC, DC"
+}
+
+function Initialize-NewtonsoftJson {
+    if ("Newtonsoft.Json.JsonConvert" -as [type]) { return }
+    $dll = Join-Path $script:ScriptDir "lib\Newtonsoft.Json.dll"
+    if (-not (Test-Path -LiteralPath $dll)) {
+        throw "Newtonsoft.Json.dll not found at $dll"
+    }
+    Add-Type -Path $dll
+}
+
+Initialize-NewtonsoftJson
+
+function ConvertFrom-JsoncText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $sr = New-Object System.IO.StringReader($Text)
+    $reader = New-Object Newtonsoft.Json.JsonTextReader($sr)
+    try {
+        $token = [Newtonsoft.Json.Linq.JToken]::Load($reader)
+        if ($null -eq $token -or $token.Type -eq [Newtonsoft.Json.Linq.JTokenType]::Null) { return $null }
+        return ($token.ToString() | ConvertFrom-Json)
+    }
+    finally {
+        $reader.Close()
+        $sr.Dispose()
+    }
+}
+
+function Add-JsoncLineComments {
+    param([string]$Json)
+    if ([string]::IsNullOrEmpty($Json)) { return $Json }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Json -split "`r?`n")) {
+        if ($line -match '^(\s*)"([^"]+)"\s*:') {
+            $name = $Matches[2]
+            if ($script:JsoncLineComments.Contains($name)) {
+                [void]$lines.Add("$($Matches[1])// $($script:JsoncLineComments[$name])")
+            }
+        }
+        [void]$lines.Add($line)
+    }
+    return ($lines -join "`r`n")
+}
+
+function Get-ChosenSettings {
+    param($Settings)
+    if ($null -eq $Settings) { return $null }
+    if ($null -ne $Settings.chosen) { return $Settings.chosen }
+    return $Settings
+}
+
+function Get-DefinitionSettings {
+    param($Doc)
+    if ($null -eq $Doc) { return $null }
+    return $Doc.definitions
+}
 
 function Get-IdleSecondsFromSettings {
     param($Settings)
-    $sec = 0
-    if ($null -ne $Settings.idleSeconds) {
-        $sec = [int]$Settings.idleSeconds
-    }
-    elseif ($null -ne $Settings.idleMinutes) {
-        $sec = [int]$Settings.idleMinutes * 60
-    }
-    else {
-        $sec = 600
+    $choice = Get-ChosenSettings -Settings $Settings
+    $sec = 600
+    if ($null -ne $choice -and $null -ne $choice.idleSeconds) {
+        $sec = [int]$choice.idleSeconds
     }
     if ($sec -lt 10) { $sec = 10 }
     if ($sec -gt 14400) { $sec = 14400 }
@@ -81,8 +143,8 @@ function Format-IdleDuration {
     return "$m min $s sec"
 }
 
-function Get-IdlePresets {
-    $default = @(
+function Get-DefaultIdlePresets {
+    return @(
         [pscustomobject]@{ label = "10 sec"; seconds = 10 },
         [pscustomobject]@{ label = "1 min"; seconds = 60 },
         [pscustomobject]@{ label = "5 min"; seconds = 300 },
@@ -91,22 +153,12 @@ function Get-IdlePresets {
         [pscustomobject]@{ label = "30 min"; seconds = 1800 },
         [pscustomobject]@{ label = "60 min"; seconds = 3600 }
     )
-    $path = Join-Path $script:ScriptDir "idle-presets.json"
-    if (-not (Test-Path -LiteralPath $path)) { return $default }
-    try {
-        $doc = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-        $list = New-Object System.Collections.Generic.List[object]
-        foreach ($p in @($doc.presets)) {
-            $sec = [int]$p.seconds
-            if ($sec -lt 10 -or $sec -gt 14400) { continue }
-            $label = [string]$p.label
-            if (-not $label) { $label = Format-IdleDuration -Seconds $sec }
-            [void]$list.Add([pscustomobject]@{ label = $label; seconds = $sec })
-        }
-        if ($list.Count -gt 0) { return @($list) }
-    }
-    catch { }
-    return $default
+}
+
+function Get-IdlePresets {
+    if ($null -eq $script:IdlePresets) { Read-AppSettingsFile }
+    if ($script:IdlePresets -and $script:IdlePresets.Count -gt 0) { return @($script:IdlePresets) }
+    return Get-DefaultIdlePresets
 }
 
 $script:QuietConfig = $null
@@ -122,9 +174,8 @@ $script:LastSampleStampUtc = $null
 $script:ConsecutiveQuietSec = 0.0
 $script:LastIdleResetReason = $null
 
-function Get-QuietConfig {
-    if ($null -ne $script:QuietConfig) { return $script:QuietConfig }
-    $cfg = [pscustomobject]@{
+function Get-DefaultQuietConfig {
+    return [pscustomobject]@{
         cpuBusyPercent  = 20.0
         diskBusyPercent = 20.0
         netBusyKBps     = 50.0
@@ -132,38 +183,54 @@ function Get-QuietConfig {
         checkCpu        = $true
         checkDisk       = $true
         checkNet        = $true
+        cpuStepPercent  = 5
+        diskStepPercent = 5
+        netStepKBps     = 10
     }
-    $path = Join-Path $script:ScriptDir "quiet.json"
-    if (Test-Path -LiteralPath $path) {
-        try {
-            $doc = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($null -ne $doc.cpuBusyPercent) { $cfg.cpuBusyPercent = [double]$doc.cpuBusyPercent }
-            if ($null -ne $doc.diskBusyPercent) { $cfg.diskBusyPercent = [double]$doc.diskBusyPercent }
-            if ($null -ne $doc.netBusyKBps) { $cfg.netBusyKBps = [double]$doc.netBusyKBps }
-            if ($null -ne $doc.minQuietRatio) { $cfg.minQuietRatio = [double]$doc.minQuietRatio }
-            if ($null -ne $doc.checkCpu) { $cfg.checkCpu = [bool]$doc.checkCpu }
-            if ($null -ne $doc.checkDisk) { $cfg.checkDisk = [bool]$doc.checkDisk }
-            if ($null -ne $doc.checkNet) { $cfg.checkNet = [bool]$doc.checkNet }
-        }
-        catch { }
-    }
-    $script:QuietConfig = $cfg
-    return $cfg
+}
+
+function Apply-QuietDoc {
+    param($Doc, $Cfg)
+    if (-not $Doc) { return $Cfg }
+    if ($null -ne $Doc.cpuBusyPercent) { $Cfg.cpuBusyPercent = [double]$Doc.cpuBusyPercent }
+    if ($null -ne $Doc.diskBusyPercent) { $Cfg.diskBusyPercent = [double]$Doc.diskBusyPercent }
+    if ($null -ne $Doc.netBusyKBps) { $Cfg.netBusyKBps = [double]$Doc.netBusyKBps }
+    if ($null -ne $Doc.minQuietRatio) { $Cfg.minQuietRatio = [double]$Doc.minQuietRatio }
+    if ($null -ne $Doc.checkCpu) { $Cfg.checkCpu = [bool]$Doc.checkCpu }
+    if ($null -ne $Doc.checkDisk) { $Cfg.checkDisk = [bool]$Doc.checkDisk }
+    if ($null -ne $Doc.checkNet) { $Cfg.checkNet = [bool]$Doc.checkNet }
+    if ($null -ne $Doc.cpuStepPercent) { $Cfg.cpuStepPercent = [int]$Doc.cpuStepPercent }
+    if ($null -ne $Doc.diskStepPercent) { $Cfg.diskStepPercent = [int]$Doc.diskStepPercent }
+    if ($null -ne $Doc.netStepKBps) { $Cfg.netStepKBps = [int]$Doc.netStepKBps }
+    if ($Cfg.cpuStepPercent -lt 1) { $Cfg.cpuStepPercent = 1 }
+    if ($Cfg.cpuStepPercent -gt 50) { $Cfg.cpuStepPercent = 50 }
+    if ($Cfg.diskStepPercent -lt 1) { $Cfg.diskStepPercent = 1 }
+    if ($Cfg.diskStepPercent -gt 50) { $Cfg.diskStepPercent = 50 }
+    if ($Cfg.netStepKBps -lt 1) { $Cfg.netStepKBps = 1 }
+    if ($Cfg.netStepKBps -gt 200) { $Cfg.netStepKBps = 200 }
+    return $Cfg
+}
+
+function Get-QuietConfig {
+    if ($null -ne $script:QuietConfig) { return $script:QuietConfig }
+    Read-AppSettingsFile
+    return $script:QuietConfig
 }
 
 function Save-QuietConfig {
+    if (-not $script:AppSettingsLoaded) { Read-AppSettingsFile }
+    Write-AppSettingsFile
+}
+
+function Get-QuietStep {
+    param(
+        [ValidateSet("cpu", "disk", "net")]
+        [string]$Kind
+    )
     $cfg = Get-QuietConfig
-    $payload = @{
-        cpuBusyPercent  = [int][math]::Round([double]$cfg.cpuBusyPercent, 0)
-        diskBusyPercent = [int][math]::Round([double]$cfg.diskBusyPercent, 0)
-        netBusyKBps     = [int][math]::Round([double]$cfg.netBusyKBps, 0)
-        minQuietRatio   = [double]$cfg.minQuietRatio
-        checkCpu        = [bool]$cfg.checkCpu
-        checkDisk       = [bool]$cfg.checkDisk
-        checkNet        = [bool]$cfg.checkNet
-    } | ConvertTo-Json
-    $path = Join-Path $script:ScriptDir "quiet.json"
-    Set-Content -LiteralPath $path -Value $payload -Encoding UTF8
+    if ($Kind -eq "cpu") { return [int]$cfg.cpuStepPercent }
+    if ($Kind -eq "disk") { return [int]$cfg.diskStepPercent }
+    return [int]$cfg.netStepKBps
 }
 
 function Set-QuietBusyLimit {
@@ -173,14 +240,16 @@ function Set-QuietBusyLimit {
         [int]$Delta
     )
     $cfg = Get-QuietConfig
+    $step = Get-QuietStep -Kind $Kind
+    if ($Delta -lt 0) { $step = -$step }
     if ($Kind -eq "cpu") {
-        $cfg.cpuBusyPercent = [math]::Min(90, [math]::Max(5, [int]$cfg.cpuBusyPercent + $Delta))
+        $cfg.cpuBusyPercent = [math]::Min(90, [math]::Max(5, [int]$cfg.cpuBusyPercent + $step))
     }
     elseif ($Kind -eq "disk") {
-        $cfg.diskBusyPercent = [math]::Min(90, [math]::Max(5, [int]$cfg.diskBusyPercent + $Delta))
+        $cfg.diskBusyPercent = [math]::Min(90, [math]::Max(5, [int]$cfg.diskBusyPercent + $step))
     }
     else {
-        $cfg.netBusyKBps = [math]::Min(2000, [math]::Max(5, [int]$cfg.netBusyKBps + $Delta))
+        $cfg.netBusyKBps = [math]::Min(2000, [math]::Max(5, [int]$cfg.netBusyKBps + $step))
     }
     $script:QuietConfig = $cfg
     Save-QuietConfig
@@ -459,11 +528,11 @@ function Test-ProfileConnected {
 
 function Get-SelectedPowerSources {
     param($Settings)
-    if ($null -ne $Settings.powerSources) {
-        $raw = @(Convert-ToStringArray $Settings.powerSources)
+    $choice = Get-ChosenSettings -Settings $Settings
+    if ($null -ne $choice -and $null -ne $choice.powerSources) {
+        $raw = @(Convert-ToStringArray $choice.powerSources)
         return @($raw | Where-Object { $_ -eq "AC" -or $_ -eq "DC" })
     }
-    if ([bool]$Settings.requireAc) { return @("AC") }
     return @()
 }
 
@@ -480,7 +549,8 @@ function Test-PowerAllowed {
 
 function Get-SelectedNetworkProfiles {
     param($Settings)
-    $selected = Convert-ToStringArray $Settings.networkProfiles
+    $choice = Get-ChosenSettings -Settings $Settings
+    $selected = Convert-ToStringArray $choice.networkProfiles
     return @($selected | Where-Object { $script:NetworkProfileMap.Keys -contains $_ })
 }
 
@@ -514,9 +584,144 @@ function Get-NetworkConditionLabels {
     return @($labels)
 }
 
-$script:DataDir = "C:\Users\Jan\AppData\Local\IdleHibernate"
-$script:HistoryPath = Join-Path $script:DataDir "history.json"
-$script:DebugPath = Join-Path $script:DataDir "debug-last.json"
+function Convert-NetworkMapFromDoc {
+    param($Doc)
+    $map = [ordered]@{}
+    $defs = Get-DefinitionSettings -Doc $Doc
+    if (-not $defs) { $defs = $Doc }
+    $src = $null
+    if ($defs -and $defs.network) { $src = $defs.network }
+    if ($src) {
+        foreach ($prop in $src.PSObject.Properties) {
+            $ssids = @($prop.Value | ForEach-Object { [string]$_ } | Where-Object { $_ })
+            if ($ssids.Count -gt 0) { $map[$prop.Name] = @($ssids) }
+        }
+    }
+    if ($map.Count -eq 0) {
+        return [ordered]@{
+            Home = @("ExampleHomeSSID")
+            Work = @("ExampleWorkSSID")
+        }
+    }
+    return $map
+}
+
+function Convert-PresetsFromDoc {
+    param($Doc)
+    $list = New-Object System.Collections.Generic.List[object]
+    $defs = Get-DefinitionSettings -Doc $Doc
+    if (-not $defs) { $defs = $Doc }
+    $raw = $null
+    if ($defs -and $defs.presets) { $raw = $defs.presets }
+    foreach ($p in @($raw)) {
+        if ($null -eq $p) { continue }
+        $sec = [int]$p.seconds
+        if ($sec -lt 10 -or $sec -gt 14400) { continue }
+        $label = [string]$p.label
+        if (-not $label) { $label = Format-IdleDuration -Seconds $sec }
+        [void]$list.Add([pscustomobject]@{ label = $label; seconds = $sec })
+    }
+    if ($list.Count -gt 0) { return $list.ToArray() }
+    return $null
+}
+
+function Read-AppSettingsFile {
+    $cfg = Get-DefaultQuietConfig
+    $presets = $null
+    $doc = $null
+    if (Test-Path -LiteralPath $script:SettingsPath) {
+        $doc = Read-JsonFile -Path $script:SettingsPath
+    }
+    $defs = Get-DefinitionSettings -Doc $doc
+    $choice = Get-ChosenSettings -Settings $doc
+    if ($defs -and $defs.quiet) {
+        $cfg = Apply-QuietDoc -Doc $defs.quiet -Cfg $cfg
+    }
+    if ($choice -and $choice.quiet) {
+        $cfg = Apply-QuietDoc -Doc $choice.quiet -Cfg $cfg
+    }
+    $presets = Convert-PresetsFromDoc -Doc $doc
+    if (-not $presets) { $presets = Get-DefaultIdlePresets }
+    $script:QuietConfig = $cfg
+    $script:IdlePresets = @($presets)
+    $script:NetworkProfileMap = Convert-NetworkMapFromDoc -Doc $doc
+    $script:AppSettingsCache = $doc
+    $script:AppSettingsLoaded = $true
+    return $doc
+}
+
+function Write-AppSettingsFile {
+    param($State)
+    $cfg = $script:QuietConfig
+    if ($null -eq $cfg) { $cfg = Get-DefaultQuietConfig }
+    $presets = @($script:IdlePresets)
+    if ($presets.Count -eq 0) { $presets = Get-DefaultIdlePresets }
+    $network = [ordered]@{}
+    foreach ($name in $script:NetworkProfileMap.Keys) {
+        $network[$name] = @($script:NetworkProfileMap[$name])
+    }
+    $presetObjs = @()
+    foreach ($p in $presets) {
+        $presetObjs += [pscustomobject]@{
+            label   = [string]$p.label
+            seconds = [int]$p.seconds
+        }
+    }
+    $idleSec = 600
+    $requireQuiet = $true
+    $power = @()
+    $profiles = @()
+    $action = "hibernate"
+    $source = $null
+    if ($State) { $source = $State }
+    elseif ($script:AppSettingsCache) { $source = $script:AppSettingsCache }
+    $choice = Get-ChosenSettings -Settings $source
+    if ($choice) {
+        $idleSec = Get-IdleSecondsFromSettings -Settings $choice
+        if ($null -ne $choice.requireQuiet) { $requireQuiet = [bool]$choice.requireQuiet }
+        $power = @(Get-SelectedPowerSources -Settings $choice)
+        $profiles = @(Convert-ToStringArray $choice.networkProfiles)
+        $action = Get-NormalizedAction -Settings $choice
+    }
+    $networkObj = [pscustomobject]$network
+    $chosen = [ordered]@{
+        idleSeconds     = $idleSec
+        requireQuiet    = [bool]$requireQuiet
+        action          = $action
+        powerSources    = @($power)
+        networkProfiles = @($profiles)
+        quiet            = [pscustomobject]@{
+            cpuBusyPercent  = [int][math]::Round([double]$cfg.cpuBusyPercent, 0)
+            diskBusyPercent = [int][math]::Round([double]$cfg.diskBusyPercent, 0)
+            netBusyKBps     = [int][math]::Round([double]$cfg.netBusyKBps, 0)
+            checkCpu        = [bool]$cfg.checkCpu
+            checkDisk       = [bool]$cfg.checkDisk
+            checkNet        = [bool]$cfg.checkNet
+        }
+    }
+    $payload = [pscustomobject]@{
+        definitions = [pscustomobject]@{
+            network = $networkObj
+            presets = @($presetObjs)
+            quiet   = [pscustomobject]@{
+                minQuietRatio   = [double]$cfg.minQuietRatio
+                cpuStepPercent  = [int]$cfg.cpuStepPercent
+                diskStepPercent = [int]$cfg.diskStepPercent
+                netStepKBps     = [int]$cfg.netStepKBps
+            }
+        }
+        chosen = [pscustomobject]$chosen
+    }
+    (Add-JsoncLineComments ($payload | ConvertTo-Json -Depth 8)) | Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
+    $script:AppSettingsCache = Read-JsonFile -Path $script:SettingsPath
+}
+
+function Get-NetworkProfileMenuLabel {
+    param([string]$Name)
+    $ssids = @($script:NetworkProfileMap[$Name])
+    if ($ssids.Count -eq 0) { return $Name }
+    return "$Name ($($ssids -join " or "))"
+}
 
 function Test-OnAc {
     try {
@@ -588,7 +793,8 @@ function Read-JsonFile {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        return ConvertFrom-JsoncText -Text $raw
     }
     catch {
         return $null
@@ -632,8 +838,9 @@ function Get-IdleEvaluation {
     $idleHit = ($null -ne $IdleMs -and [int64]$IdleMs -ge $needMs)
     $inputIsIdle = ($null -ne $IdleMs -and [int64]$IdleMs -ge 400)
     $quiet = Update-QuietSample -WindowSeconds $needSec -InputIsIdle $inputIsIdle
+    $choice = Get-ChosenSettings -Settings $Settings
     $quietRequired = $true
-    if ($null -ne $Settings.requireQuiet) { $quietRequired = [bool]$Settings.requireQuiet }
+    if ($null -ne $choice -and $null -ne $choice.requireQuiet) { $quietRequired = [bool]$choice.requireQuiet }
     if (-not (Test-AnyQuietMetricEnabled)) { $quietRequired = $false }
     $quietMet = (-not $quietRequired) -or [bool]$quiet.windowMet
     $connected = @(Get-ConnectedNetworkNames)
@@ -656,7 +863,6 @@ function Get-IdleEvaluation {
     return [pscustomobject]@{
         at               = [datetimeoffset]::Now.ToString("o")
         idleSeconds      = $needSec
-        idleMinutes      = [math]::Max(1, [int][math]::Ceiling($needSec / 60.0))
         idleLabel        = Format-IdleDuration -Seconds $needSec
         idleMs           = $IdleMs
         idleHit          = $idleHit

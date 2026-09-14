@@ -1,0 +1,68 @@
+{
+    "definitions":  {
+                        "network":  {
+                                        "Home":  [
+                                                     "ExampleHomeSSID"
+                                                 ],
+                                        "Work":  [
+                                                     "ExampleWorkSSID"
+                                                 ]
+                                    },
+                        "presets":  [
+                                        {
+                                            "label":  "10 sec",
+                                            "seconds":  10
+                                        },
+                                        {
+                                            "label":  "1 min",
+                                            "seconds":  60
+                                        },
+                                        {
+                                            "label":  "5 min",
+                                            "seconds":  300
+                                        },
+                                        {
+                                            "label":  "10 min",
+                                            "seconds":  600
+                                        },
+                                        {
+                                            "label":  "15 min",
+                                            "seconds":  900
+                                        },
+                                        {
+                                            "label":  "30 min",
+                                            "seconds":  1800
+                                        },
+                                        {
+                                            "label":  "60 min",
+                                            "seconds":  3600
+                                        }
+                                    ],
+                        "quiet":  {
+                                      "minQuietRatio":  0.9,
+                                      "cpuStepPercent":  5,
+                                      "diskStepPercent":  5,
+                                      "netStepKBps":  10
+                                  }
+                    },
+    "chosen":  {
+                   "idleSeconds":  600,
+                   "requireQuiet":  true,
+                   "action":  "hibernate",
+                   // AC, DC
+                   "powerSources":  [
+
+                                    ],
+                   "networkProfiles":  [
+
+                                       ],
+                   "quiet":  {
+                                 "cpuBusyPercent":  20,
+                                 "diskBusyPercent":  20,
+                                 "netBusyKBps":  50,
+                                 "checkCpu":  true,
+                                 "checkDisk":  true,
+                                 "checkNet":  true
+                             }
+               }
+}
