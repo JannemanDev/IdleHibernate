@@ -37,8 +37,8 @@ function Get-NormalizedAction {
 
 function Get-ActionLabel {
     param($Action)
-    if (([string]$Action).ToLowerInvariant() -eq "sleep") { return "Sleep" }
-    return "Hibernate"
+    if (([string]$Action).ToLowerInvariant() -eq "sleep") { return Get-UiText Sleep }
+    return Get-UiText Hibernate
 }
 
 function Invoke-IdlePowerAction {
@@ -60,10 +60,243 @@ $script:DataDir = Join-Path $env:LOCALAPPDATA "IdleHibernate"
 $script:SettingsPath = Join-Path $script:ScriptDir "settings.json"
 $script:HistoryPath = Join-Path $script:DataDir "history.json"
 $script:DebugPath = Join-Path $script:DataDir "debug-last.json"
+$script:DebugStatusPath = Join-Path $script:DataDir "debug-status.txt"
+$script:DebugStatusJsonPath = Join-Path $script:DataDir "debug-status.json"
 $script:IdlePresets = $null
 $script:AppSettingsLoaded = $false
 $script:JsoncLineComments = [ordered]@{
-    powerSources = "AC, DC"
+    powerSources        = "AC, DC"
+    debugRetentionHours = "hours of debug log to keep"
+    language            = "en, nl"
+}
+$script:UiLanguage = "en"
+$script:UiStrings = @{
+    en = @{
+        PauseIdle              = "Pause idle action"
+        ResumeIdle             = "Resume idle action"
+        IdleTimerPaused        = "Idle timer: {0} (paused)"
+        IdleTimerRunning       = "Idle timer: {0} ({1})"
+        IdleTimerWaiting       = "Idle timer: {0} (0:00 waiting {1})"
+        ResetReason            = "Reset reason: {0}"
+        ResetReasonNone        = "Reset reason: -"
+        IncreaseIdle           = "(+) Increase idle timer"
+        DecreaseIdle           = "(-) Decrease idle timer"
+        IdlePresets            = "Idle presets"
+        Power                  = "Power"
+        PowerAc                = "Plugged in"
+        PowerDc                = "On battery"
+        QuietPc                = "Quiet PC"
+        RequireQuiet           = "Require quiet PC"
+        CheckCpu               = "Check CPU"
+        CheckDisk              = "Check disk"
+        CheckNet               = "Check network traffic"
+        CpuBusyAbove           = "CPU busy above: {0}% (now {1}%)"
+        DiskBusyAbove          = "Disk busy above: {0}% (now {1}%)"
+        NetBusyAbove           = "Net busy above: {0} KB/s (now {1} KB/s)"
+        IncreaseCpu            = "(+) Increase CPU limit"
+        DecreaseCpu            = "(-) Decrease CPU limit"
+        IncreaseDisk           = "(+) Increase disk limit"
+        DecreaseDisk           = "(-) Decrease disk limit"
+        IncreaseNet            = "(+) Increase net limit"
+        DecreaseNet            = "(-) Decrease net limit"
+        Network                = "Network"
+        ActionMenu             = "Action: {0}"
+        Hibernate              = "Hibernate"
+        Sleep                  = "Sleep"
+        LastActions            = "Last actions"
+        NoActionsYet           = "No actions yet"
+        ClearEntries           = "Clear entries"
+        DebugLastIdle          = "Debug last idle check"
+        DebugMode              = "Debug mode"
+        OpenDebugLog           = "Open debug log"
+        NoIdleChecksYet        = "No idle checks yet"
+        Version                = "Version {0}"
+        SourceHash             = "Source hash: {0}"
+        SourceHashUnavailable  = "Source hash: unavailable"
+        ShowSettings           = "Show settings file"
+        OpenFile               = "Open file"
+        RestartTray            = "Restart tray icon"
+        ExitTray               = "Exit tray icon"
+        Language               = "Language"
+        LanguageEn             = "English"
+        LanguageNl             = "Nederlands"
+        StatusPaused           = "PAUSED"
+        StatusOn               = "ON"
+        Yes                    = "yes"
+        No                     = "no"
+        WaitPower              = "Power"
+        WaitNet                = "Net"
+        WaitCpu                = "CPU"
+        WaitDisk               = "disk"
+        WaitQuiet              = "quiet"
+        DurSec                 = "{0} sec"
+        DurMin                 = "{0} min"
+        DurMinSec              = "{0} min {1} sec"
+        Met                    = "MET"
+        NotMet                 = "NOT MET"
+        NoProfile              = "no profile"
+        NoMatchingProfile      = "no matching profile"
+        Or                     = "or"
+        None                   = "none"
+        DebugTitle             = "Idle hibernate debug"
+        DebugNone              = "Idle timer has not been reached yet."
+        DebugIdleHit           = "Idle timer hit: {0}"
+        DebugResult            = "Result: {0}"
+        DebugBlocked           = "blocked"
+        DebugIdleLine          = "Idle timer ({0}): {1} (actual {2})"
+        DebugPausedOn          = "Paused: NOT MET (actual on)"
+        DebugPausedOff         = "Paused: MET (actual off)"
+        DebugPowerNotRequired  = "Power: not required (actual {0})"
+        DebugPowerSource       = "Power {0}: {1} (actual {2})"
+        DebugQuietRequired     = "Quiet PC: required, {0}"
+        DebugQuietNotRequired  = "Quiet PC: not required"
+        DebugCpuActual         = "  CPU: actual {0} (limit {1}%)"
+        DebugCpuNotChecked     = "  CPU: not checked"
+        DebugDiskActual        = "  Disk: actual {0} (limit {1}%)"
+        DebugDiskNotChecked    = "  Disk: not checked"
+        DebugNetActual         = "  Net: actual {0} (limit {1} KB/s)"
+        DebugNetNotChecked     = "  Net: not checked"
+        DebugQuietSamples      = "  Quiet samples {0}"
+        DebugNetworkNotRequired = "Network: not required (actual {0})"
+        DebugNetworkProfile    = "Network {0} ({1}): {2} (actual {3})"
+        SettingsTitle          = "Idle hibernate settings"
+        ResetKeyboard          = "keyboard/mouse"
+        ResetCpu               = "CPU {0}% > {1}%"
+        ResetDisk              = "disk {0}% > {1}%"
+        ResetNet               = "net {0} KB/s > {1} KB/s"
+    }
+    nl = @{
+        PauseIdle              = "Idle-actie pauzeren"
+        ResumeIdle             = "Idle-actie hervatten"
+        IdleTimerPaused        = "Idle-timer: {0} (gepauzeerd)"
+        IdleTimerRunning       = "Idle-timer: {0} ({1})"
+        IdleTimerWaiting       = "Idle-timer: {0} (0:00 wacht op {1})"
+        ResetReason            = "Resetreden: {0}"
+        ResetReasonNone        = "Resetreden: -"
+        IncreaseIdle           = "(+) Idle-timer verhogen"
+        DecreaseIdle           = "(-) Idle-timer verlagen"
+        IdlePresets            = "Idle-presets"
+        Power                  = "Voeding"
+        PowerAc                = "Ingeplugd"
+        PowerDc                = "Op accu"
+        QuietPc                = "Stille pc"
+        RequireQuiet           = "Stille pc vereisen"
+        CheckCpu               = "CPU controleren"
+        CheckDisk              = "Schijf controleren"
+        CheckNet               = "Netwerkverkeer controleren"
+        CpuBusyAbove           = "CPU druk boven: {0}% (nu {1}%)"
+        DiskBusyAbove          = "Schijf druk boven: {0}% (nu {1}%)"
+        NetBusyAbove           = "Net druk boven: {0} KB/s (nu {1} KB/s)"
+        IncreaseCpu            = "(+) CPU-limiet verhogen"
+        DecreaseCpu            = "(-) CPU-limiet verlagen"
+        IncreaseDisk           = "(+) Schijflimiet verhogen"
+        DecreaseDisk           = "(-) Schijflimiet verlagen"
+        IncreaseNet            = "(+) Netlimiet verhogen"
+        DecreaseNet            = "(-) Netlimiet verlagen"
+        Network                = "Netwerk"
+        ActionMenu             = "Actie: {0}"
+        Hibernate              = "Slaapstand"
+        Sleep                  = "Sluimerstand"
+        LastActions            = "Laatste acties"
+        NoActionsYet           = "Nog geen acties"
+        ClearEntries           = "Items wissen"
+        DebugLastIdle          = "Debug laatste idle-check"
+        DebugMode              = "Debugmodus"
+        OpenDebugLog           = "Debuglog openen"
+        NoIdleChecksYet        = "Nog geen idle-checks"
+        Version                = "Versie {0}"
+        SourceHash             = "Bronhash: {0}"
+        SourceHashUnavailable  = "Bronhash: niet beschikbaar"
+        ShowSettings           = "Instellingenbestand tonen"
+        OpenFile               = "Bestand openen"
+        RestartTray            = "Tray-pictogram herstarten"
+        ExitTray               = "Tray-pictogram afsluiten"
+        Language               = "Taal"
+        LanguageEn             = "English"
+        LanguageNl             = "Nederlands"
+        StatusPaused           = "GEPAUZEERD"
+        StatusOn               = "AAN"
+        Yes                    = "ja"
+        No                     = "nee"
+        WaitPower              = "Voeding"
+        WaitNet                = "Net"
+        WaitCpu                = "CPU"
+        WaitDisk               = "schijf"
+        WaitQuiet              = "stil"
+        DurSec                 = "{0} sec"
+        DurMin                 = "{0} min"
+        DurMinSec              = "{0} min {1} sec"
+        Met                    = "WEL"
+        NotMet                 = "NIET"
+        NoProfile              = "geen profiel"
+        NoMatchingProfile      = "geen passend profiel"
+        Or                     = "of"
+        None                   = "geen"
+        DebugTitle             = "Idle-hibernate debug"
+        DebugNone              = "Idle-timer is nog niet bereikt."
+        DebugIdleHit           = "Idle-timer bereikt: {0}"
+        DebugResult            = "Resultaat: {0}"
+        DebugBlocked           = "geblokkeerd"
+        DebugIdleLine          = "Idle-timer ({0}): {1} (werkelijk {2})"
+        DebugPausedOn          = "Gepauzeerd: NIET (werkelijk aan)"
+        DebugPausedOff         = "Gepauzeerd: WEL (werkelijk uit)"
+        DebugPowerNotRequired  = "Voeding: niet vereist (werkelijk {0})"
+        DebugPowerSource       = "Voeding {0}: {1} (werkelijk {2})"
+        DebugQuietRequired     = "Stille pc: vereist, {0}"
+        DebugQuietNotRequired  = "Stille pc: niet vereist"
+        DebugCpuActual         = "  CPU: werkelijk {0} (limiet {1}%)"
+        DebugCpuNotChecked     = "  CPU: niet gecontroleerd"
+        DebugDiskActual        = "  Schijf: werkelijk {0} (limiet {1}%)"
+        DebugDiskNotChecked    = "  Schijf: niet gecontroleerd"
+        DebugNetActual         = "  Net: werkelijk {0} (limiet {1} KB/s)"
+        DebugNetNotChecked     = "  Net: niet gecontroleerd"
+        DebugQuietSamples      = "  Stille samples {0}"
+        DebugNetworkNotRequired = "Netwerk: niet vereist (werkelijk {0})"
+        DebugNetworkProfile    = "Netwerk {0} ({1}): {2} (werkelijk {3})"
+        SettingsTitle          = "Idle-hibernate instellingen"
+        ResetKeyboard          = "toetsenbord/muis"
+        ResetCpu               = "CPU {0}% > {1}%"
+        ResetDisk              = "schijf {0}% > {1}%"
+        ResetNet               = "net {0} KB/s > {1} KB/s"
+    }
+}
+
+function Get-UiText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(ValueFromRemainingArguments = $true)][object[]]$FormatArgs
+    )
+    $lang = $script:UiLanguage
+    if (-not $script:UiStrings.ContainsKey($lang)) { $lang = "en" }
+    $map = $script:UiStrings[$lang]
+    $text = $null
+    if ($map.ContainsKey($Key)) { $text = [string]$map[$Key] }
+    elseif ($script:UiStrings["en"].ContainsKey($Key)) { $text = [string]$script:UiStrings["en"][$Key] }
+    else { $text = $Key }
+    if ($FormatArgs -and $FormatArgs.Count -gt 0) {
+        return [string]::Format($text, [object[]]$FormatArgs)
+    }
+    return $text
+}
+
+function Get-PowerSourceLabel {
+    param([string]$Name)
+    if ($Name -eq "AC") { return Get-UiText PowerAc }
+    if ($Name -eq "DC") { return Get-UiText PowerDc }
+    return $Name
+}
+
+function Get-WaitLabel {
+    param([string]$Name)
+    switch ($Name) {
+        "Power" { return Get-UiText WaitPower }
+        "Net" { return Get-UiText WaitNet }
+        "CPU" { return Get-UiText WaitCpu }
+        "disk" { return Get-UiText WaitDisk }
+        "net" { return Get-UiText WaitNet }
+        "quiet" { return Get-UiText WaitQuiet }
+        default { return $Name }
+    }
 }
 
 function Initialize-NewtonsoftJson {
@@ -134,13 +367,37 @@ function Get-IdleSecondsFromSettings {
     return $sec
 }
 
+function Get-DebugRetentionHours {
+    param($Settings)
+    $hours = 1
+    $choice = Get-ChosenSettings -Settings $Settings
+    if ($null -eq $choice) { $choice = Get-ChosenSettings -Settings $script:AppSettingsCache }
+    if ($choice -and $null -ne $choice.debugRetentionHours) {
+        try { $hours = [int]$choice.debugRetentionHours } catch { $hours = 1 }
+    }
+    if ($hours -lt 1) { $hours = 1 }
+    if ($hours -gt 168) { $hours = 168 }
+    return $hours
+}
+
+function Get-UiLanguageCode {
+    param($Settings)
+    $lang = "en"
+    $choice = Get-ChosenSettings -Settings $Settings
+    if ($choice -and $null -ne $choice.language) {
+        $raw = ([string]$choice.language).ToLowerInvariant()
+        if ($raw -eq "nl" -or $raw -eq "nederlands" -or $raw -eq "dutch") { $lang = "nl" }
+    }
+    return $lang
+}
+
 function Format-IdleDuration {
     param([int]$Seconds)
-    if ($Seconds -lt 60) { return "$Seconds sec" }
-    if (($Seconds % 60) -eq 0) { return "$([int]($Seconds / 60)) min" }
+    if ($Seconds -lt 60) { return (Get-UiText DurSec $Seconds) }
+    if (($Seconds % 60) -eq 0) { return (Get-UiText DurMin ([int]($Seconds / 60))) }
     $m = [int][math]::Floor($Seconds / 60)
     $s = $Seconds % 60
-    return "$m min $s sec"
+    return (Get-UiText DurMinSec $m $s)
 }
 
 function Get-DefaultIdlePresets {
@@ -429,7 +686,7 @@ function Update-QuietSample {
     $diskLim = [int][math]::Round([double]$cfg.diskBusyPercent, 0)
     $netLim = [int][math]::Round([double]$cfg.netBusyKBps, 0)
     if (-not $InputIsIdle) {
-        $script:LastIdleResetReason = "keyboard/mouse"
+        $script:LastIdleResetReason = Get-UiText ResetKeyboard
         $script:QuietSamples.Clear()
         $script:ConsecutiveQuietSec = 0.0
         $script:LastSampleStampUtc = $now
@@ -437,13 +694,13 @@ function Update-QuietSample {
     }
     if (-not $sampleQuiet) {
         if ($cpuBusy) {
-            $script:LastIdleResetReason = "CPU $cpuTxt% > $cpuLim%"
+            $script:LastIdleResetReason = Get-UiText ResetCpu $cpuTxt $cpuLim
         }
         elseif ($diskBusy) {
-            $script:LastIdleResetReason = "disk $diskTxt% > $diskLim%"
+            $script:LastIdleResetReason = Get-UiText ResetDisk $diskTxt $diskLim
         }
         else {
-            $script:LastIdleResetReason = "net $netTxt KB/s > $netLim KB/s"
+            $script:LastIdleResetReason = Get-UiText ResetNet $netTxt $netLim
         }
     }
     $intervalSec = 0.5
@@ -575,10 +832,10 @@ function Get-NetworkConditionLabels {
     $connected = Get-ConnectedNetworkNames
     foreach ($profile in $selected) {
         if (Test-ProfileConnected -ProfileName $profile -ConnectedNames $connected) {
-            [void]$labels.Add("$profile yes")
+            [void]$labels.Add("$profile $(Get-UiText Yes)")
         }
         else {
-            [void]$labels.Add("$profile no")
+            [void]$labels.Add("$profile $(Get-UiText No)")
         }
     }
     return @($labels)
@@ -669,6 +926,9 @@ function Write-AppSettingsFile {
     }
     $idleSec = 600
     $requireQuiet = $true
+    $debugMode = $false
+    $debugRetentionHours = 1
+    $language = "en"
     $power = @()
     $profiles = @()
     $action = "hibernate"
@@ -679,15 +939,21 @@ function Write-AppSettingsFile {
     if ($choice) {
         $idleSec = Get-IdleSecondsFromSettings -Settings $choice
         if ($null -ne $choice.requireQuiet) { $requireQuiet = [bool]$choice.requireQuiet }
+        if ($null -ne $choice.debugMode) { $debugMode = [bool]$choice.debugMode }
+        $debugRetentionHours = Get-DebugRetentionHours -Settings $choice
+        $language = Get-UiLanguageCode -Settings $choice
         $power = @(Get-SelectedPowerSources -Settings $choice)
         $profiles = @(Convert-ToStringArray $choice.networkProfiles)
         $action = Get-NormalizedAction -Settings $choice
     }
     $networkObj = [pscustomobject]$network
     $chosen = [ordered]@{
-        idleSeconds     = $idleSec
-        requireQuiet    = [bool]$requireQuiet
-        action          = $action
+        idleSeconds          = $idleSec
+        requireQuiet         = [bool]$requireQuiet
+        debugMode            = [bool]$debugMode
+        debugRetentionHours  = [int]$debugRetentionHours
+        language             = $language
+        action               = $action
         powerSources    = @($power)
         networkProfiles = @($profiles)
         quiet            = [pscustomobject]@{
@@ -720,7 +986,7 @@ function Get-NetworkProfileMenuLabel {
     param([string]$Name)
     $ssids = @($script:NetworkProfileMap[$Name])
     if ($ssids.Count -eq 0) { return $Name }
-    return "$Name ($($ssids -join " or "))"
+    return "$Name ($($ssids -join " $(Get-UiText Or) "))"
 }
 
 function Test-OnAc {
@@ -819,11 +1085,11 @@ function Get-HistoryProfileLabel {
     if ($selected.Count -gt 0) {
         $hit = @($selected | Where-Object { $matched -contains $_ })
         if ($hit.Count -gt 0) { return ($hit -join ", ") }
-        return "no matching profile"
+        return (Get-UiText NoMatchingProfile)
     }
     if ($matched.Count -gt 0) { return ($matched -join ", ") }
     if ($ConnectedNames.Count -gt 0) { return $ConnectedNames[0] }
-    return "no profile"
+    return (Get-UiText NoProfile)
 }
 
 function Get-IdleEvaluation {
@@ -925,6 +1191,50 @@ function Save-IdleDebug {
     catch { }
 }
 
+function Get-IdleDebugStatusLog {
+    $doc = Read-JsonFile -Path $script:DebugStatusJsonPath
+    if (-not $doc) { return @() }
+    if ($doc.items) { return @(Convert-ToObjectArray $doc.items) }
+    if ($doc.at) { return @($doc) }
+    return @()
+}
+
+function Write-IdleDebugStatus {
+    param($Evaluation, $Settings)
+    try {
+        if (-not (Test-Path -LiteralPath $script:DataDir)) {
+            New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
+        }
+        $hours = Get-DebugRetentionHours -Settings $Settings
+        $cutoff = [datetimeoffset]::Now.AddHours(-$hours)
+        $items = New-Object System.Collections.Generic.List[object]
+        if ($Evaluation) { [void]$items.Add($Evaluation) }
+        foreach ($item in @(Get-IdleDebugStatusLog)) {
+            $at = $null
+            try {
+                if ($null -ne $item.at) {
+                    $at = [datetimeoffset]::Parse([string]$item.at)
+                }
+            }
+            catch { }
+            if ($null -ne $at -and $at -ge $cutoff) {
+                [void]$items.Add($item)
+            }
+        }
+        $parts = New-Object System.Collections.Generic.List[string]
+        $texts = New-Object System.Collections.Generic.List[string]
+        foreach ($item in $items) {
+            [void]$parts.Add(($item | ConvertTo-Json -Compress -Depth 8))
+            [void]$texts.Add((Format-DebugText -Evaluation $item))
+        }
+        $json = '{ "items": [' + ($parts -join ',') + '] }'
+        Set-Content -LiteralPath $script:DebugStatusJsonPath -Value $json -Encoding UTF8
+        $blockSep = [Environment]::NewLine + [Environment]::NewLine + "==========" + [Environment]::NewLine + [Environment]::NewLine
+        Set-Content -LiteralPath $script:DebugStatusPath -Value ($texts -join $blockSep) -Encoding UTF8
+    }
+    catch { }
+}
+
 function Add-HibernateHistory {
     param($Evaluation)
     try {
@@ -1002,120 +1312,128 @@ function Format-HistoryItem {
     if (-not $Entry) { return "-" }
     $when = Format-LocalWhen -Value $Entry.at -Pattern "dd-MM HH:mm:ss"
     $profile = [string]$Entry.profile
-    if (-not $profile) { $profile = "no profile" }
+    if (-not $profile) { $profile = Get-UiText NoProfile }
     $action = Get-ActionLabel -Action $Entry.action
     return "$when  $action  $profile"
 }
 
 function Format-MetLabel {
     param([bool]$Met)
-    if ($Met) { return "MET" }
-    return "NOT MET"
+    if ($Met) { return Get-UiText Met }
+    return Get-UiText NotMet
 }
 
 function Format-DebugText {
     param($Evaluation)
     if (-not $Evaluation) {
-        return "Idle timer has not been reached yet."
+        return Get-UiText DebugNone
     }
     $when = Format-LocalWhen -Value $Evaluation.at -Pattern "dd-MM-yyyy HH:mm:ss"
     $lines = New-Object System.Collections.Generic.List[string]
-    [void]$lines.Add("Idle timer hit: $when")
+    [void]$lines.Add((Get-UiText DebugIdleHit $when))
     if ($Evaluation.willProceed -or $Evaluation.willHibernate) {
-        [void]$lines.Add("Result: $(Get-ActionLabel -Action $Evaluation.action)")
+        [void]$lines.Add((Get-UiText DebugResult (Get-ActionLabel -Action $Evaluation.action)))
     }
     else {
-        [void]$lines.Add("Result: blocked")
+        [void]$lines.Add((Get-UiText DebugResult (Get-UiText DebugBlocked)))
     }
     [void]$lines.Add("")
     $actual = "?"
     if ($null -ne $Evaluation.idleMs) {
         $actualSec = ([double]$Evaluation.idleMs) / 1000.0
         if ($actualSec -lt 90) {
-            $actual = ([math]::Round($actualSec, 1)).ToString() + " sec"
+            $actual = Get-UiText DurSec ([math]::Round($actualSec, 1))
         }
         else {
-            $actual = ([math]::Round($actualSec / 60.0, 1)).ToString() + " min"
+            $actual = Get-UiText DurMin ([math]::Round($actualSec / 60.0, 1))
         }
     }
-    $idleLabel = [string]$Evaluation.idleLabel
-    if (-not $idleLabel) { $idleLabel = Format-IdleDuration -Seconds (Get-IdleSecondsFromSettings -Settings $Evaluation) }
-    [void]$lines.Add("Idle timer ($idleLabel): $(Format-MetLabel ([bool]$Evaluation.idleHit)) (actual $actual)")
-    if ($Evaluation.paused) {
-        [void]$lines.Add("Paused: NOT MET (actual on)")
+    $idleLabel = $null
+    if ($null -ne $Evaluation.idleSeconds) {
+        $idleLabel = Format-IdleDuration -Seconds ([int]$Evaluation.idleSeconds)
+    }
+    elseif ($Evaluation.idleLabel) {
+        $idleLabel = [string]$Evaluation.idleLabel
     }
     else {
-        [void]$lines.Add("Paused: MET (actual off)")
+        $idleLabel = Format-IdleDuration -Seconds (Get-IdleSecondsFromSettings -Settings $Evaluation)
+    }
+    [void]$lines.Add((Get-UiText DebugIdleLine $idleLabel (Format-MetLabel ([bool]$Evaluation.idleHit)) $actual))
+    if ($Evaluation.paused) {
+        [void]$lines.Add((Get-UiText DebugPausedOn))
+    }
+    else {
+        [void]$lines.Add((Get-UiText DebugPausedOff))
     }
     $actualPower = "?"
     if ($null -ne $Evaluation.acMet) {
-        if ([bool]$Evaluation.acMet) { $actualPower = "AC" } else { $actualPower = "DC" }
+        if ([bool]$Evaluation.acMet) { $actualPower = Get-PowerSourceLabel "AC" } else { $actualPower = Get-PowerSourceLabel "DC" }
     }
     if ($null -ne $Evaluation.powerRequired -or $null -ne $Evaluation.powerSources) {
         $powerSources = @(Convert-ToStringArray $Evaluation.powerSources)
         if (-not [bool]$Evaluation.powerRequired -and $powerSources.Count -eq 0) {
-            [void]$lines.Add("Power: not required (actual $actualPower)")
+            [void]$lines.Add((Get-UiText DebugPowerNotRequired $actualPower))
         }
         else {
             if ($powerSources -contains "AC") {
-                [void]$lines.Add("Power AC: $(Format-MetLabel ([bool]$Evaluation.acMet)) (actual $actualPower)")
+                [void]$lines.Add((Get-UiText DebugPowerSource (Get-PowerSourceLabel "AC") (Format-MetLabel ([bool]$Evaluation.acMet)) $actualPower))
             }
             if ($powerSources -contains "DC") {
-                [void]$lines.Add("Power DC: $(Format-MetLabel (-not [bool]$Evaluation.acMet)) (actual $actualPower)")
+                [void]$lines.Add((Get-UiText DebugPowerSource (Get-PowerSourceLabel "DC") (Format-MetLabel (-not [bool]$Evaluation.acMet)) $actualPower))
             }
         }
     }
     elseif ($Evaluation.acRequired) {
-        [void]$lines.Add("AC power: required, $(Format-MetLabel ([bool]$Evaluation.acMet)) (actual $actualPower)")
+        [void]$lines.Add((Get-UiText DebugPowerSource (Get-PowerSourceLabel "AC") (Format-MetLabel ([bool]$Evaluation.acMet)) $actualPower))
     }
     else {
-        [void]$lines.Add("Power: not required (actual $actualPower)")
+        [void]$lines.Add((Get-UiText DebugPowerNotRequired $actualPower))
     }
     if ($Evaluation.quietRequired) {
-        [void]$lines.Add("Quiet PC: required, $(Format-MetLabel ([bool]$Evaluation.quietMet))")
+        [void]$lines.Add((Get-UiText DebugQuietRequired (Format-MetLabel ([bool]$Evaluation.quietMet))))
         if ($Evaluation.checkCpu) {
             $cpu = "?"
             if ($null -ne $Evaluation.cpuPercent) { $cpu = [math]::Round([double]$Evaluation.cpuPercent, 0).ToString() + "%" }
-            [void]$lines.Add("  CPU: actual $cpu (limit $($Evaluation.cpuLimit)%)")
+            [void]$lines.Add((Get-UiText DebugCpuActual $cpu $Evaluation.cpuLimit))
         }
         else {
-            [void]$lines.Add("  CPU: not checked")
+            [void]$lines.Add((Get-UiText DebugCpuNotChecked))
         }
         if ($Evaluation.checkDisk) {
             $disk = "?"
             if ($null -ne $Evaluation.diskPercent) { $disk = [math]::Round([double]$Evaluation.diskPercent, 0).ToString() + "%" }
-            [void]$lines.Add("  Disk: actual $disk (limit $($Evaluation.diskLimit)%)")
+            [void]$lines.Add((Get-UiText DebugDiskActual $disk $Evaluation.diskLimit))
         }
         else {
-            [void]$lines.Add("  Disk: not checked")
+            [void]$lines.Add((Get-UiText DebugDiskNotChecked))
         }
         if ($Evaluation.checkNet) {
             $net = "?"
             if ($null -ne $Evaluation.netKBps) { $net = (Format-KBpsValue ([double]$Evaluation.netKBps)) + " KB/s" }
-            [void]$lines.Add("  Net: actual $net (limit $($Evaluation.netLimitKBps) KB/s)")
+            [void]$lines.Add((Get-UiText DebugNetActual $net $Evaluation.netLimitKBps))
         }
         else {
-            [void]$lines.Add("  Net: not checked")
+            [void]$lines.Add((Get-UiText DebugNetNotChecked))
         }
         $ratio = "?"
         if ($null -ne $Evaluation.quietRatio) { $ratio = [math]::Round(100.0 * [double]$Evaluation.quietRatio, 0).ToString() + "%" }
-        [void]$lines.Add("  Quiet samples $ratio")
+        [void]$lines.Add((Get-UiText DebugQuietSamples $ratio))
     }
     else {
-        [void]$lines.Add("Quiet PC: not required")
+        [void]$lines.Add((Get-UiText DebugQuietNotRequired))
     }
     $selected = @(Convert-ToStringArray $Evaluation.selectedProfiles)
     $matched = @(Convert-ToStringArray $Evaluation.matchedProfiles)
     $connected = @(Convert-ToStringArray $Evaluation.connected)
-    $actualNet = "none"
+    $actualNet = Get-UiText None
     if ($connected.Count -gt 0) { $actualNet = ($connected -join ", ") }
     if ($selected.Count -eq 0) {
-        [void]$lines.Add("Network: not required (actual $actualNet)")
+        [void]$lines.Add((Get-UiText DebugNetworkNotRequired $actualNet))
     }
     else {
         foreach ($profile in $selected) {
-            $ssids = @($script:NetworkProfileMap[$profile]) -join " or "
-            [void]$lines.Add("Network $profile ($ssids): $(Format-MetLabel ($matched -contains $profile)) (actual $actualNet)")
+            $ssids = @($script:NetworkProfileMap[$profile]) -join " $(Get-UiText Or) "
+            [void]$lines.Add((Get-UiText DebugNetworkProfile $profile $ssids (Format-MetLabel ($matched -contains $profile)) $actualNet))
         }
     }
     return ($lines -join [Environment]::NewLine)

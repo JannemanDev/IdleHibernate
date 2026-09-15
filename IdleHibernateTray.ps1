@@ -67,6 +67,11 @@ $script:flagDir = Join-Path $env:LOCALAPPDATA "IdleHibernate"
 $script:flagPath = Join-Path $script:flagDir "paused"
 $script:AppVersion = "1.1.1"
 $script:keepMenuOpen = $false
+$script:PadWide = [string][char]0x00A0
+$script:PadThin = [string][char]0x2009
+$script:padProbe = $null
+$script:padTargets = @{}
+$script:padCache = @{}
 $script:idleActionArmed = $false
 $script:debugSavedThisIdle = $false
 $script:uiReady = $false
@@ -75,6 +80,9 @@ $script:SourceFileNames = @("Common.ps1", "IdleHibernateTray.ps1", "StartTray.vb
 $script:state = [ordered]@{
     idleSeconds      = 600
     requireQuiet     = $true
+    debugMode        = $false
+    debugRetentionHours = 1
+    language         = "en"
     powerSources     = @()
     networkProfiles  = @()
     action           = "hibernate"
@@ -103,6 +111,10 @@ function Read-Settings {
         $choice = Get-ChosenSettings -Settings $s
         $script:state.idleSeconds = Get-IdleSecondsFromSettings -Settings $choice
         if ($null -ne $choice.requireQuiet) { $script:state.requireQuiet = [bool]$choice.requireQuiet }
+        if ($null -ne $choice.debugMode) { $script:state.debugMode = [bool]$choice.debugMode }
+        $script:state.debugRetentionHours = Get-DebugRetentionHours -Settings $choice
+        $script:state.language = Get-UiLanguageCode -Settings $choice
+        $script:UiLanguage = $script:state.language
         $script:state.powerSources = @(Get-SelectedPowerSources -Settings $choice)
         $script:state.networkProfiles = @(Convert-ToStringArray $choice.networkProfiles)
         $script:state.action = Get-NormalizedAction -Settings $choice
@@ -137,16 +149,16 @@ function Get-AppSourceHash {
 
 function Update-AppInfoDisplay {
     if ($script:versionItem) {
-        $script:versionItem.Text = "Version $($script:AppVersion)"
+        $script:versionItem.Text = Get-UiText Version $script:AppVersion
     }
     if ($script:hashItem) {
         $hash = Get-AppSourceHash
         if ($hash) {
             $short = $hash.Substring(0, [math]::Min(7, $hash.Length))
-            $script:hashItem.Text = "Source hash: $short"
+            $script:hashItem.Text = Get-UiText SourceHash $short
         }
         else {
-            $script:hashItem.Text = "Source hash: unavailable"
+            $script:hashItem.Text = Get-UiText SourceHashUnavailable
         }
     }
 }
@@ -156,25 +168,25 @@ function Get-TooltipText {
     $idle = Format-IdleDuration -Seconds (Get-IdleSecondsFromSettings -Settings $script:state)
     $action = Get-ActionLabel -Action $script:state.action
     if (Test-Paused) {
-        [void]$lines.Add("PAUSED | $idle | $action")
+        [void]$lines.Add("$(Get-UiText StatusPaused) | $idle | $action")
     }
     else {
-        [void]$lines.Add("ON | $idle | $action")
+        [void]$lines.Add("$(Get-UiText StatusOn) | $idle | $action")
     }
     $conds = New-Object System.Collections.Generic.List[string]
     $power = @(Get-SelectedPowerSources -Settings $script:state)
     if ($power.Count -gt 0) {
         $onAc = Test-OnAc
         if ($power -contains "AC") {
-            if ($onAc) { [void]$conds.Add("AC yes") } else { [void]$conds.Add("AC no") }
+            if ($onAc) { [void]$conds.Add("$(Get-PowerSourceLabel 'AC') $(Get-UiText Yes)") } else { [void]$conds.Add("$(Get-PowerSourceLabel 'AC') $(Get-UiText No)") }
         }
         if ($power -contains "DC") {
-            if (-not $onAc) { [void]$conds.Add("DC yes") } else { [void]$conds.Add("DC no") }
+            if (-not $onAc) { [void]$conds.Add("$(Get-PowerSourceLabel 'DC') $(Get-UiText Yes)") } else { [void]$conds.Add("$(Get-PowerSourceLabel 'DC') $(Get-UiText No)") }
         }
     }
     if ([bool]$script:state.requireQuiet) {
         $q = Get-QuietStatus
-        if ($q.windowMet) { [void]$conds.Add("Quiet yes") } else { [void]$conds.Add("Quiet no") }
+        if ($q.windowMet) { [void]$conds.Add("$(Get-UiText QuietPc) $(Get-UiText Yes)") } else { [void]$conds.Add("$(Get-UiText QuietPc) $(Get-UiText No)") }
     }
     foreach ($label in (Get-NetworkConditionLabels -Settings $script:state)) {
         [void]$conds.Add($label)
@@ -218,13 +230,17 @@ function Update-Tray {
     try {
     if (Test-Paused) {
         $script:notify.Icon = $script:iconOff
-        $script:pauseItem.Text = "Resume idle action"
+        $script:pauseItem.Text = Get-UiText ResumeIdle
     }
     else {
         $script:notify.Icon = $script:iconOn
-        $script:pauseItem.Text = "Pause idle action"
+        $script:pauseItem.Text = Get-UiText PauseIdle
     }
     $script:quietItem.Checked = [bool]$script:state.requireQuiet
+    if ($script:debugModeItem) {
+        $script:debugModeItem.Checked = [bool]$script:state.debugMode
+        $script:debugMenu.Checked = [bool]$script:state.debugMode
+    }
     $power = @($script:state.powerSources)
     $script:powerAcItem.Checked = ($power -contains "AC")
     $script:powerDcItem.Checked = ($power -contains "DC")
@@ -239,7 +255,7 @@ function Update-Tray {
     $isSleep = ((Get-NormalizedAction -Settings $script:state) -eq "sleep")
     $script:actionHibernateItem.Checked = -not $isSleep
     $script:actionSleepItem.Checked = $isSleep
-    $script:actionMenu.Text = "Action: $(Get-ActionLabel -Action $script:state.action)"
+    $script:actionMenu.Text = Get-UiText ActionMenu (Get-ActionLabel -Action $script:state.action)
     if ($script:presetItems) {
         foreach ($item in $script:presetItems) {
             $item.Checked = ([int]$item.Tag -eq [int]$script:state.idleSeconds)
@@ -273,26 +289,26 @@ function Format-RemainingClock([int]$left) {
 function Get-IdleTimerMenuText {
     param([int]$Left = -1)
     $dur = Format-IdleDuration -Seconds (Get-IdleSecondsFromSettings -Settings $script:state)
-    if (Test-Paused) { return "Idle timer: $dur (paused)" }
+    if (Test-Paused) { return (Get-UiText IdleTimerPaused $dur) }
     if ($Left -lt 0) { $Left = Get-IdleRemainingSeconds }
     $clock = Format-RemainingClock $Left
-    if ($Left -gt 0) { return "Idle timer: $dur ($clock)" }
+    if ($Left -gt 0) { return (Get-UiText IdleTimerRunning $dur $clock) }
     $waiting = New-Object System.Collections.Generic.List[string]
-    if (-not (Test-PowerAllowed -Settings $script:state -OnAc (Test-OnAc))) { [void]$waiting.Add("Power") }
-    if (-not (Test-SelectedNetworksAllowed -Settings $script:state)) { [void]$waiting.Add("Net") }
+    if (-not (Test-PowerAllowed -Settings $script:state -OnAc (Test-OnAc))) { [void]$waiting.Add((Get-WaitLabel "Power")) }
+    if (-not (Test-SelectedNetworksAllowed -Settings $script:state)) { [void]$waiting.Add((Get-WaitLabel "Net")) }
     if ([bool]$script:state.requireQuiet) {
         $q = Get-QuietStatus
-        if (-not $q.windowMet -and $q.waiting) { [void]$waiting.Add($q.waiting) }
-        elseif (-not $q.windowMet) { [void]$waiting.Add("quiet") }
+        if (-not $q.windowMet -and $q.waiting) { [void]$waiting.Add((Get-WaitLabel $q.waiting)) }
+        elseif (-not $q.windowMet) { [void]$waiting.Add((Get-WaitLabel "quiet")) }
     }
-    if ($waiting.Count -gt 0) { return "Idle timer: $dur (0:00 waiting $($waiting -join ", "))" }
-    return "Idle timer: $dur ($clock)"
+    if ($waiting.Count -gt 0) { return (Get-UiText IdleTimerWaiting $dur ($waiting -join ", ")) }
+    return (Get-UiText IdleTimerRunning $dur $clock)
 }
 
 function Update-ResetReasonDisplay([int]$left) {
     if (-not $script:resetReasonItem) { return }
     if (Test-Paused) {
-        $script:resetReasonItem.Text = "Reset reason: -"
+        Set-StableMenuItemText $script:resetReasonItem "reason" (Get-UiText ResetReasonNone)
         return
     }
     $need = Get-IdleSecondsFromSettings -Settings $script:state
@@ -311,10 +327,10 @@ function Update-ResetReasonDisplay([int]$left) {
         $reason = $script:shownResetReason
     }
     if ($show -and $reason) {
-        $script:resetReasonItem.Text = "Reset reason: $reason"
+        Set-StableMenuItemText $script:resetReasonItem "reason" (Get-UiText ResetReason $reason)
     }
     else {
-        $script:resetReasonItem.Text = "Reset reason: -"
+        Set-StableMenuItemText $script:resetReasonItem "reason" (Get-UiText ResetReasonNone)
     }
     $script:prevRemainingSec = $left
 }
@@ -329,9 +345,9 @@ function Update-QuietLimitLabels {
     if ($null -ne $q.cpu) { $cpuNow = ([int][math]::Round([double]$q.cpu, 0)).ToString() }
     if ($null -ne $q.disk) { $diskNow = ([int][math]::Round([double]$q.disk, 0)).ToString() }
     if ($null -ne $q.netKBps) { $netNow = Format-KBpsValue ([double]$q.netKBps) }
-    $script:cpuLimitLabel.Text = "CPU busy above: $([int]$cfg.cpuBusyPercent)% (now $cpuNow%)"
-    $script:diskLimitLabel.Text = "Disk busy above: $([int]$cfg.diskBusyPercent)% (now $diskNow%)"
-    $script:netLimitLabel.Text = "Net busy above: $([int]$cfg.netBusyKBps) KB/s (now $netNow KB/s)"
+    Set-StableMenuItemText $script:cpuLimitLabel "cpu" (Get-UiText CpuBusyAbove ([int]$cfg.cpuBusyPercent) $cpuNow)
+    Set-StableMenuItemText $script:diskLimitLabel "disk" (Get-UiText DiskBusyAbove ([int]$cfg.diskBusyPercent) $diskNow)
+    Set-StableMenuItemText $script:netLimitLabel "net" (Get-UiText NetBusyAbove ([int]$cfg.netBusyKBps) $netNow)
     $script:quietMenu.Checked = [bool]$script:state.requireQuiet
     $script:quietItem.Checked = [bool]$script:state.requireQuiet
     $script:checkCpuItem.Checked = [bool]$cfg.checkCpu
@@ -356,21 +372,123 @@ function Update-QuietLimitLabels {
     Set-LiveConditionColor $script:quietMenu $gateOk
 }
 
+function Set-MenuItemText($item, [string]$text) {
+    if (-not $item) { return }
+    if ($item.Text -ne $text) { $item.Text = $text }
+}
+
+# A dropdown sizes itself from the text of its items, and ignores any width we set
+# on the items or on the dropdown itself, so live text is padded with blank glyphs
+# to keep every variant the same width. Menus may then grow but never shrink.
+function Get-MenuTextWidth($item, [string]$text) {
+    if (-not $script:padProbe) {
+        $script:padProbe = New-Object System.Windows.Forms.ToolStripMenuItem
+    }
+    if ($item -and $item.Font -and -not $item.Font.Equals($script:padProbe.Font)) {
+        $script:padProbe.Font = $item.Font
+    }
+    $script:padProbe.Text = $text
+    return $script:padProbe.GetPreferredSize([System.Drawing.Size]::Empty).Width
+}
+
+function Get-PaddedMenuText($item, [string]$text, [int]$target) {
+    $natural = Get-MenuTextWidth $item $text
+    if ($natural -ge $target) { return $text }
+    $cacheKey = "$target|$text"
+    if ($script:padCache.ContainsKey($cacheKey)) { return $script:padCache[$cacheKey] }
+    $wide = 0
+    while ((Get-MenuTextWidth $item ($text + ($script:PadWide * ($wide + 1)))) -le $target) { $wide++ }
+    $best = $text
+    $bestWidth = $natural
+    foreach ($drop in 0, 1) {
+        if (($wide - $drop) -lt 0) { continue }
+        $candidate = $text + ($script:PadWide * ($wide - $drop))
+        $thin = 0
+        while ((Get-MenuTextWidth $item ($candidate + ($script:PadThin * ($thin + 1)))) -le $target) { $thin++ }
+        $candidate = $candidate + ($script:PadThin * $thin)
+        $width = Get-MenuTextWidth $item $candidate
+        if ($width -gt $bestWidth) {
+            $best = $candidate
+            $bestWidth = $width
+        }
+        if ($bestWidth -eq $target) { break }
+    }
+    $script:padCache[$cacheKey] = $best
+    return $best
+}
+
+function Set-StableMenuItemText($item, [string]$key, [string]$text) {
+    if (-not $item) { return }
+    $target = 0
+    if ($script:padTargets.ContainsKey($key)) { $target = [int]$script:padTargets[$key] }
+    $natural = Get-MenuTextWidth $item $text
+    if ($natural -gt $target) {
+        $target = $natural
+        $script:padTargets[$key] = $natural
+    }
+    Set-MenuItemText $item (Get-PaddedMenuText $item $text $target)
+}
+
+function Add-MenuTextWidth($item, [string]$key, [string]$text) {
+    if (-not $item -or -not $text) { return }
+    $width = Get-MenuTextWidth $item $text
+    $target = 0
+    if ($script:padTargets.ContainsKey($key)) { $target = [int]$script:padTargets[$key] }
+    if ($width -gt $target) { $script:padTargets[$key] = $width }
+}
+
+function Reset-MenuTextWidths {
+    $script:padTargets = @{}
+    $script:padCache = @{}
+}
+
+# Reserve room for the longest text each live row can realistically show, so the
+# menu opens at its final width instead of widening while it is on screen.
+function Add-LiveMenuTextWidths {
+    $cfg = Get-QuietConfig
+    $dur = Format-IdleDuration -Seconds (Get-IdleSecondsFromSettings -Settings $script:state)
+    Add-MenuTextWidth $script:idleLabel "idle" (Get-UiText IdleTimerRunning $dur "10:00")
+    Add-MenuTextWidth $script:idleLabel "idle" (Get-UiText IdleTimerPaused $dur)
+    Add-MenuTextWidth $script:resetReasonItem "reason" (Get-UiText ResetReasonNone)
+    Add-MenuTextWidth $script:resetReasonItem "reason" (Get-UiText ResetReason (Get-UiText ResetKeyboard))
+    Add-MenuTextWidth $script:resetReasonItem "reason" (Get-UiText ResetReason (Get-UiText ResetCpu "100" ([int]$cfg.cpuBusyPercent)))
+    Add-MenuTextWidth $script:resetReasonItem "reason" (Get-UiText ResetReason (Get-UiText ResetDisk "100" ([int]$cfg.diskBusyPercent)))
+    Add-MenuTextWidth $script:resetReasonItem "reason" (Get-UiText ResetReason (Get-UiText ResetNet "999999" ([int]$cfg.netBusyKBps)))
+    Add-MenuTextWidth $script:cpuLimitLabel "cpu" (Get-UiText CpuBusyAbove ([int]$cfg.cpuBusyPercent) "100")
+    Add-MenuTextWidth $script:diskLimitLabel "disk" (Get-UiText DiskBusyAbove ([int]$cfg.diskBusyPercent) "100")
+    Add-MenuTextWidth $script:netLimitLabel "net" (Get-UiText NetBusyAbove ([int]$cfg.netBusyKBps) "999999")
+}
+
+function Initialize-MenuTextWidths {
+    Reset-MenuTextWidths
+    Add-LiveMenuTextWidths
+}
+
+function Set-SubmenuDropDownDirection($menuItem) {
+    if (-not $script:menu -or -not $menuItem) { return }
+    $screen = [System.Windows.Forms.Screen]::FromControl($script:menu)
+    if (-not $screen) { $screen = [System.Windows.Forms.Screen]::PrimaryScreen }
+    $need = $menuItem.DropDown.GetPreferredSize([System.Drawing.Size]::Empty).Width
+    $spaceRight = $screen.WorkingArea.Right - $script:menu.Right
+    if ($spaceRight -lt ($need + 12)) {
+        $menuItem.DropDownDirection = [System.Windows.Forms.ToolStripDropDownDirection]::Left
+    }
+    else {
+        $menuItem.DropDownDirection = [System.Windows.Forms.ToolStripDropDownDirection]::Right
+    }
+}
+
 function Update-RemainingDisplay {
     try {
     if (Test-Paused) {
-        if ($script:idleLabel) {
-            $script:idleLabel.Text = Get-IdleTimerMenuText -Left 0
-        }
-        if ($script:resetReasonItem) { $script:resetReasonItem.Text = "Reset reason: -" }
+        Set-StableMenuItemText $script:idleLabel "idle" (Get-IdleTimerMenuText -Left 0)
+        Set-StableMenuItemText $script:resetReasonItem "reason" (Get-UiText ResetReasonNone)
         Update-QuietLimitLabels
         Invoke-IdleTimeoutIfNeeded
         return
     }
     $left = Get-IdleRemainingSeconds
-    if ($script:idleLabel) {
-        $script:idleLabel.Text = Get-IdleTimerMenuText -Left $left
-    }
+    Set-StableMenuItemText $script:idleLabel "idle" (Get-IdleTimerMenuText -Left $left)
     Update-ResetReasonDisplay $left
     Update-QuietLimitLabels
     Invoke-IdleTimeoutIfNeeded
@@ -417,9 +535,9 @@ function Change-Idle([int]$direction) {
     $script:keepMenuOpen = $true
     $current = Get-IdleSecondsFromSettings -Settings $script:state
     $step = 10
-    if ($current -gt 60) { $step = 60 }
+    if ($direction -gt 0 -and $current -ge 60) { $step = 60 }
+    elseif ($direction -lt 0 -and $current -gt 60) { $step = 60 }
     $next = $current + ($direction * $step)
-    if ($current -eq 60 -and $direction -lt 0) { $next = 10 }
     $next = Get-IdleSecondsFromSettings -Settings ([pscustomobject]@{ idleSeconds = $next })
     if ($next -eq $current) { return }
     $script:state.idleSeconds = $next
@@ -438,6 +556,10 @@ function Enable-KeepSubmenuOpen($menuItem) {
             $e.Cancel = $true
         }
     })
+    $dropDown.Add_Opening({
+        param($sender, $e)
+        Set-SubmenuDropDownDirection $menuItem
+    }.GetNewClosure())
 }
 
 function Set-IdleSeconds([int]$seconds) {
@@ -453,22 +575,22 @@ function Set-IdleSeconds([int]$seconds) {
 Read-Settings
 
 $script:menu = New-Object System.Windows.Forms.ContextMenuStrip
-$script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem "Pause idle action"
+$script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText PauseIdle)
 $script:pauseItem.Add_Click({ Toggle-Paused })
 
-$script:idleLabel = New-Object System.Windows.Forms.ToolStripMenuItem "Idle timer: 10 min"
+$script:idleLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IdleTimerRunning (Format-IdleDuration -Seconds 600) "10:00")
 $script:idleLabel.Enabled = $false
-$script:resetReasonItem = New-Object System.Windows.Forms.ToolStripMenuItem "Reset reason: -"
+$script:resetReasonItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ResetReasonNone)
 $script:resetReasonItem.Enabled = $false
 $script:prevRemainingSec = $null
 $script:shownResetReason = $null
 $script:resetReasonUntil = [datetime]::MinValue
-$script:idleUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Increase idle timer"
-$script:idleDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease idle timer"
+$script:idleUp = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IncreaseIdle)
+$script:idleDown = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DecreaseIdle)
 $script:idleUp.Add_Click({ Change-Idle 1 })
 $script:idleDown.Add_Click({ Change-Idle -1 })
 
-$script:presetMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Idle presets"
+$script:presetMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IdlePresets)
 $script:presetItems = New-Object System.Collections.Generic.List[System.Windows.Forms.ToolStripMenuItem]
 foreach ($preset in (Get-IdlePresets)) {
     $sec = [int]$preset.seconds
@@ -537,7 +659,8 @@ function Update-NetworkMenuStatus {
         foreach ($name in @($script:netProfileItems.Keys)) {
             $item = $script:netProfileItems[$name]
             $item.Checked = ($selected -contains $name)
-            $item.Text = Get-NetworkProfileMenuLabel $name
+            $label = Get-NetworkProfileMenuLabel $name
+            Set-MenuItemText $item $label
             Set-LiveConditionColor $item (Test-ProfileConnected -ProfileName $name -ConnectedNames $connected)
         }
     }
@@ -549,6 +672,15 @@ function Rebuild-NetworkMenu {
     if (-not $script:netProfileItems) {
         $script:netProfileItems = @{}
     }
+    $names = @($script:NetworkProfileMap.Keys)
+    $existing = @($script:netProfileItems.Keys)
+    $same = ($names.Count -eq $existing.Count -and $script:netMenu.DropDownItems.Count -eq $names.Count)
+    if ($same) {
+        foreach ($name in $names) {
+            if (-not $script:netProfileItems.ContainsKey($name)) { $same = $false; break }
+        }
+    }
+    if ($same) { return }
     $script:netMenu.DropDownItems.Clear()
     $script:netProfileItems.Clear()
     foreach ($name in @($script:NetworkProfileMap.Keys)) {
@@ -570,8 +702,8 @@ function Rebuild-NetworkMenu {
     }
 }
 
-$script:powerMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Power"
-$script:powerAcItem = New-Object System.Windows.Forms.ToolStripMenuItem "AC"
+$script:powerMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText Power)
+$script:powerAcItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText PowerAc)
 $script:powerAcItem.CheckOnClick = $true
 $script:powerAcItem.Add_Click({
     $script:keepMenuOpen = $true
@@ -580,7 +712,7 @@ $script:powerAcItem.Add_Click({
     Update-Tray
     Update-PowerMenuStatus
 })
-$script:powerDcItem = New-Object System.Windows.Forms.ToolStripMenuItem "DC"
+$script:powerDcItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText PowerDc)
 $script:powerDcItem.CheckOnClick = $true
 $script:powerDcItem.Add_Click({
     $script:keepMenuOpen = $true
@@ -594,8 +726,8 @@ $script:powerDcItem.Add_Click({
 Enable-KeepSubmenuOpen $script:powerMenu
 $script:powerMenu.DropDown.Add_Opening({ Update-PowerMenuStatus })
 
-$script:quietMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Quiet PC"
-$script:quietItem = New-Object System.Windows.Forms.ToolStripMenuItem "Require quiet PC"
+$script:quietMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText QuietPc)
+$script:quietItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText RequireQuiet)
 $script:quietItem.CheckOnClick = $true
 $script:quietItem.Add_Click({
     $script:keepMenuOpen = $true
@@ -603,17 +735,17 @@ $script:quietItem.Add_Click({
     Save-Settings
     Update-Tray
 })
-$script:checkCpuItem = New-Object System.Windows.Forms.ToolStripMenuItem "Check CPU"
+$script:checkCpuItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText CheckCpu)
 $script:checkCpuItem.CheckOnClick = $true
 $script:checkCpuItem.Add_Click({
     $script:keepMenuOpen = $true
     Set-QuietCheckEnabled -Kind cpu -Enabled $script:checkCpuItem.Checked
     Update-QuietLimitLabels
 })
-$script:cpuLimitLabel = New-Object System.Windows.Forms.ToolStripMenuItem "CPU busy above: 20% (now --%)"
+$script:cpuLimitLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText CpuBusyAbove 20 "--")
 $script:cpuLimitLabel.Enabled = $false
-$script:cpuLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Increase CPU limit"
-$script:cpuLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease CPU limit"
+$script:cpuLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IncreaseCpu)
+$script:cpuLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DecreaseCpu)
 $script:cpuLimitUp.Add_Click({
     $script:keepMenuOpen = $true
     Set-QuietBusyLimit -Kind cpu -Delta 1
@@ -624,17 +756,17 @@ $script:cpuLimitDown.Add_Click({
     Set-QuietBusyLimit -Kind cpu -Delta -1
     Update-QuietLimitLabels
 })
-$script:checkDiskItem = New-Object System.Windows.Forms.ToolStripMenuItem "Check disk"
+$script:checkDiskItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText CheckDisk)
 $script:checkDiskItem.CheckOnClick = $true
 $script:checkDiskItem.Add_Click({
     $script:keepMenuOpen = $true
     Set-QuietCheckEnabled -Kind disk -Enabled $script:checkDiskItem.Checked
     Update-QuietLimitLabels
 })
-$script:diskLimitLabel = New-Object System.Windows.Forms.ToolStripMenuItem "Disk busy above: 20% (now --%)"
+$script:diskLimitLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DiskBusyAbove 20 "--")
 $script:diskLimitLabel.Enabled = $false
-$script:diskLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Increase disk limit"
-$script:diskLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease disk limit"
+$script:diskLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IncreaseDisk)
+$script:diskLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DecreaseDisk)
 $script:diskLimitUp.Add_Click({
     $script:keepMenuOpen = $true
     Set-QuietBusyLimit -Kind disk -Delta 1
@@ -645,17 +777,17 @@ $script:diskLimitDown.Add_Click({
     Set-QuietBusyLimit -Kind disk -Delta -1
     Update-QuietLimitLabels
 })
-$script:checkNetItem = New-Object System.Windows.Forms.ToolStripMenuItem "Check network traffic"
+$script:checkNetItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText CheckNet)
 $script:checkNetItem.CheckOnClick = $true
 $script:checkNetItem.Add_Click({
     $script:keepMenuOpen = $true
     Set-QuietCheckEnabled -Kind net -Enabled $script:checkNetItem.Checked
     Update-QuietLimitLabels
 })
-$script:netLimitLabel = New-Object System.Windows.Forms.ToolStripMenuItem "Net busy above: 50 KB/s (now -- KB/s)"
+$script:netLimitLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText NetBusyAbove 50 "--")
 $script:netLimitLabel.Enabled = $false
-$script:netLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem "(+) Increase net limit"
-$script:netLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem "(-) Decrease net limit"
+$script:netLimitUp = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IncreaseNet)
+$script:netLimitDown = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DecreaseNet)
 $script:netLimitUp.Add_Click({
     $script:keepMenuOpen = $true
     Set-QuietBusyLimit -Kind net -Delta 1
@@ -692,15 +824,15 @@ $script:quietMenu.DropDown.Add_Opening({
     catch { }
 })
 
-$script:netMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Network"
+$script:netMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText Network)
 $script:netProfileItems = @{}
 Rebuild-NetworkMenu
 Enable-KeepSubmenuOpen $script:netMenu
 $script:netMenu.DropDown.Add_Opening({ Update-NetworkMenuStatus })
 
-$script:actionMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Action: Hibernate"
-$script:actionHibernateItem = New-Object System.Windows.Forms.ToolStripMenuItem "Hibernate"
-$script:actionSleepItem = New-Object System.Windows.Forms.ToolStripMenuItem "Sleep"
+$script:actionMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ActionMenu (Get-UiText Hibernate))
+$script:actionHibernateItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText Hibernate)
+$script:actionSleepItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText Sleep)
 $script:actionHibernateItem.Add_Click({
     $script:keepMenuOpen = $true
     $script:state.action = "hibernate"
@@ -717,28 +849,23 @@ $script:actionSleepItem.Add_Click({
 [void]$script:actionMenu.DropDownItems.Add($script:actionSleepItem)
 Enable-KeepSubmenuOpen $script:actionMenu
 
-$script:historyMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Last actions"
+$script:historyMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText LastActions)
 $script:historyItems = New-Object System.Collections.Generic.List[System.Windows.Forms.ToolStripMenuItem]
 for ($i = 0; $i -lt 5; $i++) {
-    $item = New-Object System.Windows.Forms.ToolStripMenuItem "No actions yet"
+    $item = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText NoActionsYet)
     $item.Enabled = $false
     [void]$script:historyItems.Add($item)
     [void]$script:historyMenu.DropDownItems.Add($item)
 }
 [void]$script:historyMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-$script:historyClearItem = New-Object System.Windows.Forms.ToolStripMenuItem "Clear entries"
+$script:historyClearItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ClearEntries)
 $script:historyClearItem.Add_Click({
     $script:keepMenuOpen = $true
     Clear-HibernateHistory
     Update-HistoryMenu
 })
 [void]$script:historyMenu.DropDownItems.Add($script:historyClearItem)
-$script:historyMenu.DropDown.Add_Closing({
-    param($sender, $e)
-    if ($script:keepMenuOpen -and $e.CloseReason -eq [System.Windows.Forms.ToolStripDropDownCloseReason]::ItemClicked) {
-        $e.Cancel = $true
-    }
-})
+Enable-KeepSubmenuOpen $script:historyMenu
 
 function Update-HistoryMenu {
     $entries = @(Get-HibernateHistory)
@@ -748,7 +875,7 @@ function Update-HistoryMenu {
             $script:historyItems[$i].Visible = $true
         }
         elseif ($i -eq 0) {
-            $script:historyItems[$i].Text = "No actions yet"
+            $script:historyItems[$i].Text = Get-UiText NoActionsYet
             $script:historyItems[$i].Visible = $true
         }
         else {
@@ -763,7 +890,7 @@ function Update-HistoryMenu {
 function Show-IdleDebugWindow($Evaluation) {
     $text = Format-DebugText -Evaluation $Evaluation
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Idle hibernate debug"
+    $form.Text = Get-UiText DebugTitle
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.Size = New-Object System.Drawing.Size(540, 520)
     $form.MinimizeBox = $false
@@ -794,11 +921,11 @@ function Show-IdleDebugWindow($Evaluation) {
     $green = [System.Drawing.Color]::FromArgb(0, 140, 0)
     $red = [System.Drawing.Color]::FromArgb(200, 0, 0)
     $normal = $box.ForeColor
-    foreach ($part in [regex]::Split([string]$text, '(NOT MET|MET)')) {
+    foreach ($part in [regex]::Split([string]$text, '(NOT MET|NIET|MET|WEL)')) {
         $box.SelectionStart = $box.TextLength
         $box.SelectionLength = 0
-        if ($part -eq "MET") { $box.SelectionColor = $green }
-        elseif ($part -eq "NOT MET") { $box.SelectionColor = $red }
+        if ($part -eq "MET" -or $part -eq "WEL") { $box.SelectionColor = $green }
+        elseif ($part -eq "NOT MET" -or $part -eq "NIET") { $box.SelectionColor = $red }
         else { $box.SelectionColor = $normal }
         [void]$box.AppendText($part)
     }
@@ -809,13 +936,65 @@ function Show-IdleDebugWindow($Evaluation) {
     $form.Dispose()
 }
 
-$script:debugMenu = New-Object System.Windows.Forms.ToolStripMenuItem "Debug last idle check"
+function Write-CurrentDebugStatus {
+    if (-not [bool]$script:state.debugMode) { return }
+    $idleMs = [int64][UserIdle]::GetIdleMs()
+    $eval = Get-IdleEvaluation -Settings $script:state -Paused (Test-Paused) -IdleMs $idleMs -OnAc (Test-OnAc)
+    Write-IdleDebugStatus -Evaluation $eval -Settings $script:state
+    Update-DebugLogItem
+}
+
+function Update-DebugLogItem {
+    if (-not $script:debugLogItem) { return }
+    $script:debugLogItem.Enabled = (Test-Path -LiteralPath $script:DebugStatusPath)
+}
+
+function Update-DebugMode {
+    if ($script:debugModeItem) {
+        $script:debugModeItem.Checked = [bool]$script:state.debugMode
+    }
+    if ($script:debugMenu) {
+        $script:debugMenu.Checked = [bool]$script:state.debugMode
+    }
+    if (-not $script:debugStatusTimer) { return }
+    if ([bool]$script:state.debugMode) {
+        if (-not $script:debugStatusTimer.Enabled) {
+            Write-CurrentDebugStatus
+            $script:debugStatusTimer.Start()
+        }
+    }
+    else {
+        $script:debugStatusTimer.Stop()
+    }
+    Update-DebugLogItem
+}
+
+$script:debugMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DebugLastIdle)
+$script:debugModeItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DebugMode)
+$script:debugModeItem.CheckOnClick = $true
+$script:debugModeItem.Add_Click({
+    $script:keepMenuOpen = $true
+    $script:state.debugMode = $script:debugModeItem.Checked
+    Save-Settings
+    Update-DebugMode
+})
+[void]$script:debugMenu.DropDownItems.Add($script:debugModeItem)
+$script:debugLogItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText OpenDebugLog)
+$script:debugLogItem.Enabled = $false
+$script:debugLogItem.Add_Click({
+    $script:keepMenuOpen = $true
+    if (-not (Test-Path -LiteralPath $script:DebugStatusPath)) { return }
+    Start-Process -FilePath "notepad.exe" -ArgumentList "`"$($script:DebugStatusPath)`""
+})
+[void]$script:debugMenu.DropDownItems.Add($script:debugLogItem)
+[void]$script:debugMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $script:debugItems = New-Object System.Collections.Generic.List[System.Windows.Forms.ToolStripMenuItem]
 for ($i = 0; $i -lt 5; $i++) {
-    $item = New-Object System.Windows.Forms.ToolStripMenuItem "No idle checks yet"
+    $item = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText NoIdleChecksYet)
     $item.Enabled = $false
     $item.Add_Click({
         param($sender, $e)
+        $script:keepMenuOpen = $true
         $eval = $null
         if ($sender -and $sender.Tag) { $eval = $sender.Tag }
         elseif ($this -and $this.Tag) { $eval = $this.Tag }
@@ -826,19 +1005,14 @@ for ($i = 0; $i -lt 5; $i++) {
     [void]$script:debugMenu.DropDownItems.Add($item)
 }
 [void]$script:debugMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-$script:debugClearItem = New-Object System.Windows.Forms.ToolStripMenuItem "Clear entries"
+$script:debugClearItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ClearEntries)
 $script:debugClearItem.Add_Click({
     $script:keepMenuOpen = $true
     Clear-IdleDebugLog
     Update-DebugMenu
 })
 [void]$script:debugMenu.DropDownItems.Add($script:debugClearItem)
-$script:debugMenu.DropDown.Add_Closing({
-    param($sender, $e)
-    if ($script:keepMenuOpen -and $e.CloseReason -eq [System.Windows.Forms.ToolStripDropDownCloseReason]::ItemClicked) {
-        $e.Cancel = $true
-    }
-})
+Enable-KeepSubmenuOpen $script:debugMenu
 
 function Update-DebugMenu {
     $entries = @(Get-IdleDebugLog)
@@ -853,7 +1027,7 @@ function Update-DebugMenu {
             Set-LiveConditionColor $script:debugItems[$i] $proceed
         }
         elseif ($i -eq 0) {
-            $script:debugItems[$i].Text = "No idle checks yet"
+            $script:debugItems[$i].Text = Get-UiText NoIdleChecksYet
             $script:debugItems[$i].Tag = $null
             $script:debugItems[$i].Enabled = $false
             $script:debugItems[$i].Visible = $true
@@ -867,6 +1041,7 @@ function Update-DebugMenu {
     if ($script:debugClearItem) {
         $script:debugClearItem.Enabled = ($entries.Count -gt 0)
     }
+    Update-DebugLogItem
 }
 
 function Show-SettingsFileWindow {
@@ -878,7 +1053,7 @@ function Show-SettingsFileWindow {
     }
     if (-not $text) { $text = "(empty)" }
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Idle hibernate settings"
+    $form.Text = Get-UiText SettingsTitle
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.Size = New-Object System.Drawing.Size(560, 580)
     $form.MinimizeBox = $false
@@ -896,7 +1071,7 @@ function Show-SettingsFileWindow {
     $buttons.Height = 44
 
     $openBtn = New-Object System.Windows.Forms.Button
-    $openBtn.Text = "Open file"
+    $openBtn.Text = Get-UiText OpenFile
     $openBtn.Width = 100
     $openBtn.Height = 28
     $openBtn.Location = New-Object System.Drawing.Point(12, 8)
@@ -934,17 +1109,88 @@ function Show-SettingsFileWindow {
     $form.Dispose()
     Read-Settings
     Rebuild-NetworkMenu
+    Update-UiLanguage
     Update-Tray
 }
 
-$script:versionItem = New-Object System.Windows.Forms.ToolStripMenuItem "Version $($script:AppVersion)"
+function Set-UiLanguage([string]$lang) {
+    $script:keepMenuOpen = $true
+    $next = Get-UiLanguageCode -Settings ([pscustomobject]@{ language = $lang })
+    $script:state.language = $next
+    $script:UiLanguage = $next
+    Save-Settings
+    Update-UiLanguage
+    Add-LiveMenuTextWidths
+    Update-RemainingDisplay
+}
+
+function Update-UiLanguage {
+    $script:UiLanguage = Get-UiLanguageCode -Settings $script:state
+    if ($script:idleUp) { $script:idleUp.Text = Get-UiText IncreaseIdle }
+    if ($script:idleDown) { $script:idleDown.Text = Get-UiText DecreaseIdle }
+    if ($script:presetMenu) { $script:presetMenu.Text = Get-UiText IdlePresets }
+    if ($script:powerMenu) { $script:powerMenu.Text = Get-UiText Power }
+    if ($script:powerAcItem) { $script:powerAcItem.Text = Get-UiText PowerAc }
+    if ($script:powerDcItem) { $script:powerDcItem.Text = Get-UiText PowerDc }
+    if ($script:quietMenu) { $script:quietMenu.Text = Get-UiText QuietPc }
+    if ($script:quietItem) { $script:quietItem.Text = Get-UiText RequireQuiet }
+    if ($script:checkCpuItem) { $script:checkCpuItem.Text = Get-UiText CheckCpu }
+    if ($script:cpuLimitUp) { $script:cpuLimitUp.Text = Get-UiText IncreaseCpu }
+    if ($script:cpuLimitDown) { $script:cpuLimitDown.Text = Get-UiText DecreaseCpu }
+    if ($script:checkDiskItem) { $script:checkDiskItem.Text = Get-UiText CheckDisk }
+    if ($script:diskLimitUp) { $script:diskLimitUp.Text = Get-UiText IncreaseDisk }
+    if ($script:diskLimitDown) { $script:diskLimitDown.Text = Get-UiText DecreaseDisk }
+    if ($script:checkNetItem) { $script:checkNetItem.Text = Get-UiText CheckNet }
+    if ($script:netLimitUp) { $script:netLimitUp.Text = Get-UiText IncreaseNet }
+    if ($script:netLimitDown) { $script:netLimitDown.Text = Get-UiText DecreaseNet }
+    if ($script:netMenu) { $script:netMenu.Text = Get-UiText Network }
+    if ($script:actionHibernateItem) { $script:actionHibernateItem.Text = Get-UiText Hibernate }
+    if ($script:actionSleepItem) { $script:actionSleepItem.Text = Get-UiText Sleep }
+    if ($script:historyMenu) { $script:historyMenu.Text = Get-UiText LastActions }
+    if ($script:historyClearItem) { $script:historyClearItem.Text = Get-UiText ClearEntries }
+    if ($script:debugMenu) { $script:debugMenu.Text = Get-UiText DebugLastIdle }
+    if ($script:debugModeItem) { $script:debugModeItem.Text = Get-UiText DebugMode }
+    if ($script:debugLogItem) { $script:debugLogItem.Text = Get-UiText OpenDebugLog }
+    if ($script:debugClearItem) { $script:debugClearItem.Text = Get-UiText ClearEntries }
+    if ($script:settingsFileItem) { $script:settingsFileItem.Text = Get-UiText ShowSettings }
+    if ($script:restartItem) { $script:restartItem.Text = Get-UiText RestartTray }
+    if ($script:exitItem) { $script:exitItem.Text = Get-UiText ExitTray }
+    if ($script:languageMenu) { $script:languageMenu.Text = Get-UiText Language }
+    if ($script:languageEnItem) {
+        $script:languageEnItem.Text = Get-UiText LanguageEn
+        $script:languageEnItem.Checked = ($script:UiLanguage -eq "en")
+    }
+    if ($script:languageNlItem) {
+        $script:languageNlItem.Text = Get-UiText LanguageNl
+        $script:languageNlItem.Checked = ($script:UiLanguage -eq "nl")
+    }
+    Rebuild-NetworkMenu
+    Update-PowerMenuStatus
+    Update-NetworkMenuStatus
+    Update-QuietLimitLabels
+    Update-HistoryMenu
+    Update-DebugMenu
+    Update-AppInfoDisplay
+    Update-Tray
+}
+
+$script:languageMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText Language)
+$script:languageEnItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText LanguageEn)
+$script:languageNlItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText LanguageNl)
+$script:languageEnItem.Add_Click({ Set-UiLanguage "en" })
+$script:languageNlItem.Add_Click({ Set-UiLanguage "nl" })
+[void]$script:languageMenu.DropDownItems.Add($script:languageEnItem)
+[void]$script:languageMenu.DropDownItems.Add($script:languageNlItem)
+Enable-KeepSubmenuOpen $script:languageMenu
+
+$script:versionItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText Version $script:AppVersion)
 $script:versionItem.Enabled = $false
-$script:hashItem = New-Object System.Windows.Forms.ToolStripMenuItem "Source hash: --"
+$script:hashItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText SourceHash "--")
 $script:hashItem.Enabled = $false
-$script:settingsFileItem = New-Object System.Windows.Forms.ToolStripMenuItem "Show settings file"
+$script:settingsFileItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ShowSettings)
 $script:settingsFileItem.Add_Click({ Show-SettingsFileWindow })
 
-$script:restartItem = New-Object System.Windows.Forms.ToolStripMenuItem "Restart tray icon"
+$script:restartItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText RestartTray)
 $script:restartItem.Add_Click({
     $script:uiReady = $false
     try { $script:notify.Visible = $false } catch { }
@@ -953,7 +1199,7 @@ $script:restartItem.Add_Click({
     Start-Process -FilePath "wscript.exe" -ArgumentList @("`"$PSScriptRoot\StartTray.vbs`"", "delay")
     [System.Windows.Forms.Application]::Exit()
 })
-$script:exitItem = New-Object System.Windows.Forms.ToolStripMenuItem "Exit tray icon"
+$script:exitItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ExitTray)
 $script:exitItem.Add_Click({
     $script:notify.Visible = $false
     [System.Windows.Forms.Application]::Exit()
@@ -974,6 +1220,7 @@ $script:exitItem.Add_Click({
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$script:menu.Items.Add($script:historyMenu)
 [void]$script:menu.Items.Add($script:debugMenu)
+[void]$script:menu.Items.Add($script:languageMenu)
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$script:menu.Items.Add($script:versionItem)
 [void]$script:menu.Items.Add($script:hashItem)
@@ -981,11 +1228,18 @@ $script:exitItem.Add_Click({
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$script:menu.Items.Add($script:restartItem)
 [void]$script:menu.Items.Add($script:exitItem)
-Update-AppInfoDisplay
+Update-UiLanguage
 
 $script:countdownTimer = New-Object System.Windows.Forms.Timer
 $script:countdownTimer.Interval = 250
 $script:countdownTimer.Add_Tick({ Update-RemainingDisplay })
+
+$script:debugStatusTimer = New-Object System.Windows.Forms.Timer
+$script:debugStatusTimer.Interval = 10000
+$script:debugStatusTimer.Add_Tick({
+    try { Write-CurrentDebugStatus } catch { }
+})
+Update-DebugMode
 
 $script:menu.AutoClose = $true
 $script:menu.Add_Opening({
@@ -996,11 +1250,10 @@ $script:menu.Add_Opening({
     }
     try {
         Read-Settings
-        Rebuild-NetworkMenu
-        Update-HistoryMenu
-        Update-DebugMenu
+        Update-UiLanguage
+        Update-DebugMode
+        Initialize-MenuTextWidths
         Update-RemainingDisplay
-        Update-AppInfoDisplay
         $script:countdownTimer.Start()
         if ($script:hidden -and $script:hidden.IsHandleCreated) {
             [void][TrayNative]::SetForegroundWindow($script:hidden.Handle)
@@ -1028,6 +1281,7 @@ $script:menu.Add_Closing({
 
 $script:menu.Add_Closed({
     $script:countdownTimer.Stop()
+    Reset-MenuTextWidths
 })
 
 $script:notify.Add_MouseUp({
@@ -1089,6 +1343,7 @@ $timer.Stop()
 $timer.Dispose()
 $script:countdownTimer.Stop()
 $script:countdownTimer.Dispose()
+try { $script:debugStatusTimer.Stop(); $script:debugStatusTimer.Dispose() } catch { }
 try { $script:notify.Dispose() } catch { }
 $script:iconOn.Dispose()
 $script:iconOff.Dispose()

@@ -48,6 +48,11 @@
     "chosen":  {
                    "idleSeconds":  600,
                    "requireQuiet":  true,
+                   "debugMode":  false,
+                   // hours of debug log to keep
+                   "debugRetentionHours":  1,
+                   // en, nl
+                   "language":  "en",
                    "action":  "hibernate",
                    // AC, DC
                    "powerSources":  [
