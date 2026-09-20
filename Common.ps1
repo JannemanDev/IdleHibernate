@@ -26,29 +26,102 @@ public static class PowerStateNative {
 "@
 }
 
+if (-not ("IdleDesktopNative" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class IdleDesktopNative {
+    const uint WM_SYSCOMMAND = 0x0112;
+    static readonly IntPtr SC_MONITORPOWER = (IntPtr)0xF170;
+    static readonly IntPtr MONITOR_OFF = (IntPtr)2;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool LockWorkStation();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    static extern IntPtr DefWindowProc(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int SetCurrentProcessExplicitAppUserModelID(string AppID);
+
+    static void SendOff(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) { return; }
+        SendMessage(hwnd, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF);
+        DefWindowProc(hwnd, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF);
+    }
+
+    // Do not broadcast WM_SYSCOMMAND: HWND_BROADCAST is handled by winlogon and
+    // locks the session, so display-off looked the same as Lock.
+    public static void TurnOffDisplay(IntPtr ownedHwnd) {
+        SendOff(ownedHwnd);
+        SendOff(FindWindow("Progman", null));
+        SendOff(FindWindow("Shell_TrayWnd", null));
+    }
+}
+"@
+}
+
+function Get-KnownActions {
+    return @("hibernate", "sleep", "displayoff", "lock", "shutdown")
+}
+
 function Get-NormalizedAction {
     param($Settings)
     $choice = Get-ChosenSettings -Settings $Settings
     $action = ""
-    if ($null -ne $choice) { $action = [string]$choice.action }
-    if ($action.ToLowerInvariant() -eq "sleep") { return "sleep" }
+    if ($null -ne $choice) { $action = [string](Get-ObjectProperty $choice "action") }
+    if (-not $action -and $Settings) { $action = [string](Get-ObjectProperty $Settings "action") }
+    $name = $action.ToLowerInvariant()
+    foreach ($known in (Get-KnownActions)) {
+        if ($name -eq $known) { return $known }
+    }
     return "hibernate"
 }
 
 function Get-ActionLabel {
     param($Action)
-    if (([string]$Action).ToLowerInvariant() -eq "sleep") { return Get-UiText Sleep }
-    return Get-UiText Hibernate
+    switch (Get-NormalizedAction -Settings ([pscustomobject]@{ action = $Action })) {
+        "sleep" { return Get-UiText Sleep }
+        "displayoff" { return Get-UiText DisplayOff }
+        "lock" { return Get-UiText Lock }
+        "shutdown" { return Get-UiText Shutdown }
+        default { return Get-UiText Hibernate }
+    }
 }
 
 function Invoke-IdlePowerAction {
     param($Action)
     $name = Get-NormalizedAction -Settings ([pscustomobject]@{ action = $Action })
-    if ($name -eq "sleep") {
-        [void][PowerStateNative]::SetSuspendState($false, $true, $false)
-    }
-    else {
-        shutdown.exe /h
+    switch ($name) {
+        "sleep" { [void][PowerStateNative]::SetSuspendState($false, $true, $false) }
+        "lock" {
+            $locked = $false
+            try { $locked = [IdleDesktopNative]::LockWorkStation() } catch { }
+            if (-not $locked) {
+                Start-Process -FilePath "$env:SystemRoot\System32\rundll32.exe" -ArgumentList @("user32.dll,LockWorkStation") -WindowStyle Hidden
+            }
+        }
+        "displayoff" {
+            $hwnd = [IntPtr]::Zero
+            if ($script:hidden -and $script:hidden.IsHandleCreated) {
+                $hwnd = $script:hidden.Handle
+            }
+            try {
+                if ($script:notify -and $script:notify.Visible) {
+                    $script:notify.Visible = $false
+                    $script:notify.Visible = $true
+                }
+            }
+            catch { }
+            Start-Sleep -Milliseconds 500
+            [IdleDesktopNative]::TurnOffDisplay($hwnd)
+        }
+        "shutdown" {
+            Start-Process -FilePath "shutdown.exe" -ArgumentList @("/s", "/t", "0") -WindowStyle Hidden
+        }
+        default { shutdown.exe /h }
     }
 }
 
@@ -64,10 +137,19 @@ $script:DebugStatusPath = Join-Path $script:DataDir "debug-status.txt"
 $script:DebugStatusJsonPath = Join-Path $script:DataDir "debug-status.json"
 $script:IdlePresets = $null
 $script:AppSettingsLoaded = $false
+# Stamped onto every evaluation so a debug dump names the build that produced it. The tray
+# fills these in at startup.
+$script:AppVersion = $null
+$script:AppSourceHash = $null
 $script:JsoncLineComments = [ordered]@{
     powerSources        = "AC, DC"
     debugRetentionHours = "hours of debug log to keep"
+    debugFlushSeconds   = "seconds between SQLite debug writes"
     language            = "en, nl"
+    selected            = "name of the active chosen config"
+    autoSwitch          = "switch config when the current network belongs to another config"
+    warnSeconds         = "seconds to warn before the action; 0 = none"
+    resetReasons        = "keyboard, mouse"
 }
 $script:UiLanguage = "en"
 $script:UiStrings = @{
@@ -81,7 +163,17 @@ $script:UiStrings = @{
         ResetReasonNone        = "Reset reason: -"
         IncreaseIdle           = "(+) Increase idle timer"
         DecreaseIdle           = "(-) Decrease idle timer"
-        IdlePresets            = "Idle presets"
+        IdlePresets            = "Idle timer presets"
+        IdleResetReasons       = "Idle timer reset reasons"
+        ResetReasonKeyboard    = "Keyboard"
+        ResetReasonMouse       = "Mouse"
+        ConfigMenu             = "Config: {0}"
+        ConfigMenuAuto         = "Config: {0} (auto)"
+        ConfigItemAuto         = "{0} (auto)"
+        AutoSwitchConfig       = "Auto-switch config"
+        AutoSwitchConflictTitle = "Auto-switch config"
+        AutoSwitchConflictBody = "Each network can belong to only one config while auto-switch is on.`n`n{0}"
+        AutoSwitchConflictLine = "{0}: {1}"
         Power                  = "Power"
         PowerAc                = "Plugged in"
         PowerDc                = "On battery"
@@ -93,6 +185,8 @@ $script:UiStrings = @{
         CpuBusyAbove           = "CPU busy above: {0}% (now {1}%)"
         DiskBusyAbove          = "Disk busy above: {0}% (now {1}%)"
         NetBusyAbove           = "Net busy above: {0} KB/s (now {1} KB/s)"
+        QuietSamplesRow        = "Quiet samples: {0}% (min {1}%)"
+        QuietWindowRow         = "Quiet window: {0}/{1} sec"
         IncreaseCpu            = "(+) Increase CPU limit"
         DecreaseCpu            = "(-) Decrease CPU limit"
         IncreaseDisk           = "(+) Increase disk limit"
@@ -103,12 +197,26 @@ $script:UiStrings = @{
         ActionMenu             = "Action: {0}"
         Hibernate              = "Hibernate"
         Sleep                  = "Sleep"
+        DisplayOff             = "Turn off display"
+        Lock                   = "Lock"
+        Shutdown               = "Shut down"
+        WarnBefore             = "Warn before: {0}"
+        WarnOff                = "off"
+        IncreaseWarn           = "(+) Increase warning"
+        DecreaseWarn           = "(-) Decrease warning"
+        WarnToastTitle         = "Idle action"
+        WarnToastBody          = "{0} in {1}. Move the mouse to cancel."
+        WarnToastBodyBoth      = "{0} in {1}. Move the mouse or press a key to cancel."
+        WarnToastBodyMouse     = "{0} in {1}. Move the mouse to cancel."
+        WarnToastBodyKeyboard  = "{0} in {1}. Press a key to cancel."
+        WarnToastBodyNone      = "{0} in {1}."
+        IdleTimerWarning       = "Idle timer: {0} ({1} in {2})"
         LastActions            = "Last actions"
         NoActionsYet           = "No actions yet"
         ClearEntries           = "Clear entries"
         DebugLastIdle          = "Debug last idle check"
         DebugMode              = "Debug mode"
-        OpenDebugLog           = "Open debug log"
+        OpenDebugLog           = "Open dashboard"
         NoIdleChecksYet        = "No idle checks yet"
         Version                = "Version {0}"
         SourceHash             = "Source hash: {0}"
@@ -142,6 +250,7 @@ $script:UiStrings = @{
         DebugNone              = "Idle timer has not been reached yet."
         DebugIdleHit           = "Idle timer hit: {0}"
         DebugResult            = "Result: {0}"
+        DebugVersion           = "Version {0} ({1})"
         DebugBlocked           = "blocked"
         DebugIdleLine          = "Idle timer ({0}): {1} (actual {2})"
         DebugPausedOn          = "Paused: NOT MET (actual on)"
@@ -150,17 +259,22 @@ $script:UiStrings = @{
         DebugPowerSource       = "Power {0}: {1} (actual {2})"
         DebugQuietRequired     = "Quiet PC: required, {0}"
         DebugQuietNotRequired  = "Quiet PC: not required"
-        DebugCpuActual         = "  CPU: actual {0} (limit {1}%)"
+        DebugCpuActual         = "  CPU: actual {0} (limit {1}%), {2}"
         DebugCpuNotChecked     = "  CPU: not checked"
-        DebugDiskActual        = "  Disk: actual {0} (limit {1}%)"
+        DebugDiskActual        = "  Disk: actual {0} (limit {1}%), {2}"
         DebugDiskNotChecked    = "  Disk: not checked"
-        DebugNetActual         = "  Net: actual {0} (limit {1} KB/s)"
+        DebugNetActual         = "  Net: actual {0} (limit {1} KB/s), {2}"
         DebugNetNotChecked     = "  Net: not checked"
-        DebugQuietSamples      = "  Quiet samples {0}"
+        DebugQuietRatioWindow  = "  Quiet ratio/window: required, {0}"
+        DebugQuietSamples      = "    Quiet samples ratio {0}% (minimum {1}%), {2}"
+        DebugQuietWindow       = "    Quiet window {0} sec (at least for {1} sec), {2}"
         DebugNetworkNotRequired = "Network: not required (actual {0})"
-        DebugNetworkProfile    = "Network {0} ({1}): {2} (actual {3})"
+        DebugNetworkRequired   = "Network: required, {0} (actual {1})"
+        DebugNetworkProfile    = "  {0} ({1}): {2}"
         SettingsTitle          = "Idle hibernate settings"
-        ResetKeyboard          = "keyboard/mouse"
+        ResetKeyboard          = "keyboard"
+        ResetMouse             = "mouse"
+        ResetKeyboardMouse     = "keyboard/mouse"
         ResetCpu               = "CPU {0}% > {1}%"
         ResetDisk              = "disk {0}% > {1}%"
         ResetNet               = "net {0} KB/s > {1} KB/s"
@@ -175,7 +289,17 @@ $script:UiStrings = @{
         ResetReasonNone        = "Resetreden: -"
         IncreaseIdle           = "(+) Idle-timer verhogen"
         DecreaseIdle           = "(-) Idle-timer verlagen"
-        IdlePresets            = "Idle-presets"
+        IdlePresets            = "Idle-timer presets"
+        IdleResetReasons       = "Idle-timer resetredenen"
+        ResetReasonKeyboard    = "Toetsenbord"
+        ResetReasonMouse       = "Muis"
+        ConfigMenu             = "Config: {0}"
+        ConfigMenuAuto         = "Config: {0} (auto)"
+        ConfigItemAuto         = "{0} (auto)"
+        AutoSwitchConfig       = "Config automatisch wisselen"
+        AutoSwitchConflictTitle = "Config automatisch wisselen"
+        AutoSwitchConflictBody = "Elk netwerk mag bij automatisch wisselen maar tot één config behoren.`n`n{0}"
+        AutoSwitchConflictLine = "{0}: {1}"
         Power                  = "Voeding"
         PowerAc                = "Ingeplugd"
         PowerDc                = "Op accu"
@@ -187,6 +311,8 @@ $script:UiStrings = @{
         CpuBusyAbove           = "CPU druk boven: {0}% (nu {1}%)"
         DiskBusyAbove          = "Schijf druk boven: {0}% (nu {1}%)"
         NetBusyAbove           = "Net druk boven: {0} KB/s (nu {1} KB/s)"
+        QuietSamplesRow        = "Stille samples: {0}% (min {1}%)"
+        QuietWindowRow         = "Stille periode: {0}/{1} sec"
         IncreaseCpu            = "(+) CPU-limiet verhogen"
         DecreaseCpu            = "(-) CPU-limiet verlagen"
         IncreaseDisk           = "(+) Schijflimiet verhogen"
@@ -197,12 +323,26 @@ $script:UiStrings = @{
         ActionMenu             = "Actie: {0}"
         Hibernate              = "Slaapstand"
         Sleep                  = "Sluimerstand"
+        DisplayOff             = "Beeldscherm uitzetten"
+        Lock                   = "Vergrendelen"
+        Shutdown               = "Afsluiten"
+        WarnBefore             = "Waarschuwen: {0}"
+        WarnOff                = "uit"
+        IncreaseWarn           = "(+) Waarschuwing verhogen"
+        DecreaseWarn           = "(-) Waarschuwing verlagen"
+        WarnToastTitle         = "Idle-actie"
+        WarnToastBody          = "{0} over {1}. Beweeg de muis om te annuleren."
+        WarnToastBodyBoth      = "{0} over {1}. Beweeg de muis of druk op een toets om te annuleren."
+        WarnToastBodyMouse     = "{0} over {1}. Beweeg de muis om te annuleren."
+        WarnToastBodyKeyboard  = "{0} over {1}. Druk op een toets om te annuleren."
+        WarnToastBodyNone      = "{0} over {1}."
+        IdleTimerWarning       = "Idle-timer: {0} ({1} over {2})"
         LastActions            = "Laatste acties"
         NoActionsYet           = "Nog geen acties"
         ClearEntries           = "Items wissen"
         DebugLastIdle          = "Debug laatste idle-check"
         DebugMode              = "Debugmodus"
-        OpenDebugLog           = "Debuglog openen"
+        OpenDebugLog           = "Dashboard openen"
         NoIdleChecksYet        = "Nog geen idle-checks"
         Version                = "Versie {0}"
         SourceHash             = "Bronhash: {0}"
@@ -236,6 +376,7 @@ $script:UiStrings = @{
         DebugNone              = "Idle-timer is nog niet bereikt."
         DebugIdleHit           = "Idle-timer bereikt: {0}"
         DebugResult            = "Resultaat: {0}"
+        DebugVersion           = "Versie {0} ({1})"
         DebugBlocked           = "geblokkeerd"
         DebugIdleLine          = "Idle-timer ({0}): {1} (werkelijk {2})"
         DebugPausedOn          = "Gepauzeerd: NIET (werkelijk aan)"
@@ -244,17 +385,22 @@ $script:UiStrings = @{
         DebugPowerSource       = "Voeding {0}: {1} (werkelijk {2})"
         DebugQuietRequired     = "Stille pc: vereist, {0}"
         DebugQuietNotRequired  = "Stille pc: niet vereist"
-        DebugCpuActual         = "  CPU: werkelijk {0} (limiet {1}%)"
+        DebugCpuActual         = "  CPU: werkelijk {0} (limiet {1}%), {2}"
         DebugCpuNotChecked     = "  CPU: niet gecontroleerd"
-        DebugDiskActual        = "  Schijf: werkelijk {0} (limiet {1}%)"
+        DebugDiskActual        = "  Schijf: werkelijk {0} (limiet {1}%), {2}"
         DebugDiskNotChecked    = "  Schijf: niet gecontroleerd"
-        DebugNetActual         = "  Net: werkelijk {0} (limiet {1} KB/s)"
+        DebugNetActual         = "  Net: werkelijk {0} (limiet {1} KB/s), {2}"
         DebugNetNotChecked     = "  Net: niet gecontroleerd"
-        DebugQuietSamples      = "  Stille samples {0}"
+        DebugQuietRatioWindow  = "  Stille ratio/periode: vereist, {0}"
+        DebugQuietSamples      = "    Stille samples-ratio {0}% (minimum {1}%), {2}"
+        DebugQuietWindow       = "    Stille periode {0} sec (minstens {1} sec), {2}"
         DebugNetworkNotRequired = "Netwerk: niet vereist (werkelijk {0})"
-        DebugNetworkProfile    = "Netwerk {0} ({1}): {2} (werkelijk {3})"
+        DebugNetworkRequired   = "Netwerk: vereist, {0} (werkelijk {1})"
+        DebugNetworkProfile    = "  {0} ({1}): {2}"
         SettingsTitle          = "Idle-hibernate instellingen"
-        ResetKeyboard          = "toetsenbord/muis"
+        ResetKeyboard          = "toetsenbord"
+        ResetMouse             = "muis"
+        ResetKeyboardMouse     = "toetsenbord/muis"
         ResetCpu               = "CPU {0}% > {1}%"
         ResetDisk              = "schijf {0}% > {1}%"
         ResetNet               = "net {0} KB/s > {1} KB/s"
@@ -273,7 +419,7 @@ function Get-UiText {
     if ($map.ContainsKey($Key)) { $text = [string]$map[$Key] }
     elseif ($script:UiStrings["en"].ContainsKey($Key)) { $text = [string]$script:UiStrings["en"][$Key] }
     else { $text = $Key }
-    if ($FormatArgs -and $FormatArgs.Count -gt 0) {
+    if ($null -ne $FormatArgs -and $FormatArgs.Count -gt 0) {
         return [string]::Format($text, [object[]]$FormatArgs)
     }
     return $text
@@ -326,33 +472,214 @@ function ConvertFrom-JsoncText {
     }
 }
 
-function Add-JsoncLineComments {
-    param([string]$Json)
-    if ([string]::IsNullOrEmpty($Json)) { return $Json }
-    $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($line in ($Json -split "`r?`n")) {
-        if ($line -match '^(\s*)"([^"]+)"\s*:') {
-            $name = $Matches[2]
-            if ($script:JsoncLineComments.Contains($name)) {
-                [void]$lines.Add("$($Matches[1])// $($script:JsoncLineComments[$name])")
-            }
-        }
-        [void]$lines.Add($line)
+# Writes JSONC with a fixed two-space indent, and keeps an object or array on one line when
+# it holds nothing but scalars and still fits the line budget. ConvertTo-Json on PS 5.1
+# instead aligns every nested value under its key, which runs the indent off to the right.
+function ConvertTo-JsoncText {
+    param(
+        $Value,
+        $Comments = $null,
+        [int]$MaxWidth = 100,
+        [int]$Indent = 0,
+        [int]$Column = 0
+    )
+    $step = 2
+    $pad = " " * ($Indent + $step)
+    $tail = " " * $Indent
+
+    if ($null -eq $Value) { return "null" }
+    if ($Value -is [string]) { return [Newtonsoft.Json.JsonConvert]::ToString([string]$Value) }
+    if ($Value -is [bool]) {
+        if ($Value) { return "true" }
+        return "false"
     }
-    return ($lines -join "`r`n")
+
+    $pairs = $null
+    if ($Value -is [System.Collections.IDictionary]) {
+        $pairs = New-Object System.Collections.Specialized.OrderedDictionary
+        foreach ($key in $Value.Keys) { $pairs[[string]$key] = $Value[$key] }
+    }
+    elseif ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $pairs = New-Object System.Collections.Specialized.OrderedDictionary
+        foreach ($prop in $Value.PSObject.Properties) { $pairs[[string]$prop.Name] = $prop.Value }
+    }
+
+    if ($null -ne $pairs) {
+        if ($pairs.Count -eq 0) { return "{}" }
+        $names = New-Object System.Collections.Generic.List[string]
+        $entries = New-Object System.Collections.Generic.List[string]
+        $split = $false
+        foreach ($name in $pairs.Keys) {
+            $key = [Newtonsoft.Json.JsonConvert]::ToString([string]$name)
+            $child = ConvertTo-JsoncText -Value $pairs[$name] -Comments $Comments -MaxWidth $MaxWidth -Indent ($Indent + $step) -Column ($Indent + $step + $key.Length + 2)
+            if ($child.Contains("`n")) { $split = $true }
+            # A documented key has to stay on its own line, otherwise its comment has nowhere to go.
+            if ($null -ne $Comments -and $Comments.Contains($name)) { $split = $true }
+            [void]$names.Add([string]$name)
+            [void]$entries.Add("${key}: $child")
+        }
+        if (-not $split) {
+            $one = "{ " + ($entries -join ", ") + " }"
+            if (($Column + $one.Length) -le $MaxWidth) { return $one }
+        }
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void]$lines.Add("{")
+        for ($i = 0; $i -lt $entries.Count; $i++) {
+            if ($null -ne $Comments -and $Comments.Contains($names[$i])) {
+                [void]$lines.Add("$pad// $($Comments[$names[$i]])")
+            }
+            $comma = ","
+            if ($i -eq ($entries.Count - 1)) { $comma = "" }
+            [void]$lines.Add("$pad$($entries[$i])$comma")
+        }
+        [void]$lines.Add("$tail}")
+        return ($lines -join "`r`n")
+    }
+
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $items = @($Value)
+        if ($items.Count -eq 0) { return "[]" }
+        $parts = New-Object System.Collections.Generic.List[string]
+        $split = $false
+        foreach ($item in $items) {
+            $child = ConvertTo-JsoncText -Value $item -Comments $Comments -MaxWidth $MaxWidth -Indent ($Indent + $step) -Column ($Indent + $step)
+            if ($child.Contains("`n")) { $split = $true }
+            [void]$parts.Add($child)
+        }
+        if (-not $split) {
+            $one = "[" + ($parts -join ", ") + "]"
+            if (($Column + $one.Length) -le $MaxWidth) { return $one }
+        }
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void]$lines.Add("[")
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $comma = ","
+            if ($i -eq ($parts.Count - 1)) { $comma = "" }
+            [void]$lines.Add("$pad$($parts[$i])$comma")
+        }
+        [void]$lines.Add("$tail]")
+        return ($lines -join "`r`n")
+    }
+
+    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) {
+        return [Newtonsoft.Json.JsonConvert]::ToString([double]$Value)
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [byte]) {
+        return [string][int64]$Value
+    }
+    return ($Value | ConvertTo-Json -Compress -Depth 8)
 }
 
-function Get-ChosenSettings {
-    param($Settings)
-    if ($null -eq $Settings) { return $null }
-    if ($null -ne $Settings.chosen) { return $Settings.chosen }
-    return $Settings
+function Get-ObjectProperty {
+    param($Obj, [string]$Name)
+    if ($null -eq $Obj -or -not $Name) { return $null }
+    if ($Obj -is [System.Collections.IDictionary]) {
+        if ($Obj.Contains($Name)) { return $Obj[$Name] }
+        return $null
+    }
+    $prop = $Obj.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
+function Test-NameEquals {
+    param([string]$Left, [string]$Right)
+    return [string]::Equals([string]$Left, [string]$Right, [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Get-DefinitionSettings {
     param($Doc)
     if ($null -eq $Doc) { return $null }
-    return $Doc.definitions
+    return (Get-ObjectProperty $Doc "definitions")
+}
+
+function Get-ChosenList {
+    param($Doc)
+    if ($null -eq $Doc) { return @() }
+    $raw = Get-ObjectProperty $Doc "chosen"
+    if ($null -eq $raw) { return @() }
+    return @($raw)
+}
+
+function Get-ChosenName {
+    param($Choice, [int]$Index = 0)
+    $name = [string](Get-ObjectProperty $Choice "name")
+    if ($name) { return $name }
+    if ($Index -le 0) { return "Default" }
+    return "Profile $($Index + 1)"
+}
+
+function Get-SelectedChosenName {
+    param($Settings)
+    $name = [string](Get-ObjectProperty $Settings "chosenName")
+    if (-not $name) {
+        $defs = Get-DefinitionSettings -Doc $Settings
+        $name = [string](Get-ObjectProperty $defs "selected")
+    }
+    if (-not $name) {
+        $name = [string](Get-ObjectProperty $Settings "selected")
+    }
+    if (-not $name -and $null -eq (Get-ObjectProperty $Settings "chosen")) {
+        $defs = Get-DefinitionSettings -Doc $script:AppSettingsCache
+        $name = [string](Get-ObjectProperty $defs "selected")
+    }
+    $doc = $Settings
+    if ($null -eq (Get-ObjectProperty $doc "chosen")) { $doc = $script:AppSettingsCache }
+    $list = @(Get-ChosenList -Doc $doc)
+    if ($list.Count -eq 0) {
+        if ($name) { return $name }
+        return "Default"
+    }
+    if ($name) {
+        $i = 0
+        foreach ($item in $list) {
+            $itemName = Get-ChosenName -Choice $item -Index $i
+            if (Test-NameEquals $itemName $name) { return $itemName }
+            $i++
+        }
+    }
+    return (Get-ChosenName -Choice $list[0] -Index 0)
+}
+
+function Find-ChosenByName {
+    param($List, [string]$Name)
+    $items = @($List)
+    $i = 0
+    foreach ($item in $items) {
+        if (Test-NameEquals (Get-ChosenName -Choice $item -Index $i) $Name) { return $item }
+        $i++
+    }
+    if ($items.Count -gt 0) { return $items[0] }
+    return $null
+}
+
+function Get-ChosenSettings {
+    param($Settings)
+    if ($null -eq $Settings) { return $null }
+    if ($null -ne (Get-ObjectProperty $Settings "chosen")) {
+        $list = @(Get-ChosenList -Doc $Settings)
+        if ($list.Count -eq 0) { return $null }
+        return (Find-ChosenByName -List $list -Name (Get-SelectedChosenName -Settings $Settings))
+    }
+    return $Settings
+}
+
+function Get-DefinitionField {
+    param($Settings, [string]$Name)
+    foreach ($root in @($Settings, $script:AppSettingsCache)) {
+        if ($null -eq $root) { continue }
+        $defs = Get-DefinitionSettings -Doc $root
+        $val = Get-ObjectProperty $defs $Name
+        if ($null -ne $val) { return $val }
+        $val = Get-ObjectProperty $root $Name
+        if ($null -ne $val) { return $val }
+        if ($null -ne (Get-ObjectProperty $root "chosen")) {
+            $choice = Get-ChosenSettings -Settings $root
+            $val = Get-ObjectProperty $choice $Name
+            if ($null -ne $val) { return $val }
+        }
+    }
+    return $null
 }
 
 function Get-IdleSecondsFromSettings {
@@ -367,26 +694,223 @@ function Get-IdleSecondsFromSettings {
     return $sec
 }
 
+function Get-WarnSeconds {
+    param($Settings)
+    $sec = 30
+    $raw = Get-DefinitionField -Settings $Settings -Name "warnSeconds"
+    if ($null -ne $raw) {
+        try { $sec = [int]$raw } catch { $sec = 30 }
+    }
+    if ($sec -lt 0) { $sec = 0 }
+    if ($sec -gt 300) { $sec = 300 }
+    return $sec
+}
+
+function Apply-IdleResetReasonsDoc {
+    param($Doc, $Cfg)
+    if (-not $Doc) { return $Cfg }
+    $nested = Get-ObjectProperty $Doc "resetReasons"
+    if ($nested) {
+        $k = Get-ObjectProperty $nested "keyboard"
+        $m = Get-ObjectProperty $nested "mouse"
+        if ($null -ne $k) { $Cfg.keyboard = [bool]$k }
+        if ($null -ne $m) { $Cfg.mouse = [bool]$m }
+    }
+    $k2 = Get-ObjectProperty $Doc "resetKeyboard"
+    $m2 = Get-ObjectProperty $Doc "resetMouse"
+    if ($null -ne $k2) { $Cfg.keyboard = [bool]$k2 }
+    if ($null -ne $m2) { $Cfg.mouse = [bool]$m2 }
+    return $Cfg
+}
+
+function Get-IdleResetReasons {
+    param($Settings)
+    $cfg = [pscustomobject]@{ keyboard = $true; mouse = $true }
+    if ($Settings) {
+        $choice = Get-ChosenSettings -Settings $Settings
+        if ($choice) { $cfg = Apply-IdleResetReasonsDoc -Doc $choice -Cfg $cfg }
+        $cfg = Apply-IdleResetReasonsDoc -Doc $Settings -Cfg $cfg
+    }
+    return $cfg
+}
+
+function Get-InputResetReasonText {
+    $reasons = Get-IdleResetReasons -Settings $script:state
+    $useKbd = [bool]$reasons.keyboard
+    $useMouse = [bool]$reasons.mouse
+    if (-not $useKbd -and -not $useMouse) { return $null }
+    $watch = $false
+    try { $watch = [bool][IdleInputWatch]::Started } catch { }
+    if (-not $watch) { return (Get-UiText ResetKeyboardMouse) }
+    $kbdMs = [int64]::MaxValue
+    $mouseMs = [int64]::MaxValue
+    if ($useKbd) { $kbdMs = [int64][IdleInputWatch]::IdleMsFromTick([IdleInputWatch]::LastKeyboardTick) }
+    if ($useMouse) { $mouseMs = [int64][IdleInputWatch]::IdleMsFromTick([IdleInputWatch]::LastMouseTick) }
+    if ($kbdMs -le $mouseMs) { return (Get-UiText ResetKeyboard) }
+    return (Get-UiText ResetMouse)
+}
+
 function Get-DebugRetentionHours {
     param($Settings)
     $hours = 1
-    $choice = Get-ChosenSettings -Settings $Settings
-    if ($null -eq $choice) { $choice = Get-ChosenSettings -Settings $script:AppSettingsCache }
-    if ($choice -and $null -ne $choice.debugRetentionHours) {
-        try { $hours = [int]$choice.debugRetentionHours } catch { $hours = 1 }
+    $raw = Get-DefinitionField -Settings $Settings -Name "debugRetentionHours"
+    if ($null -ne $raw) {
+        try { $hours = [int]$raw } catch { $hours = 1 }
     }
     if ($hours -lt 1) { $hours = 1 }
     if ($hours -gt 168) { $hours = 168 }
     return $hours
 }
 
+function Get-DebugFlushSeconds {
+    param($Settings)
+    $sec = 30
+    $raw = Get-DefinitionField -Settings $Settings -Name "debugFlushSeconds"
+    if ($null -ne $raw) {
+        try { $sec = [int]$raw } catch { $sec = 30 }
+    }
+    if ($sec -lt 5) { $sec = 5 }
+    if ($sec -gt 300) { $sec = 300 }
+    return $sec
+}
+
+function Get-DebugModeEnabled {
+    param($Settings)
+    $raw = Get-DefinitionField -Settings $Settings -Name "debugMode"
+    if ($null -eq $raw) { return $false }
+    return [bool]$raw
+}
+
+function Get-AutoSwitchEnabled {
+    param($Settings)
+    $raw = Get-DefinitionField -Settings $Settings -Name "autoSwitch"
+    if ($null -eq $raw) { return $false }
+    return [bool]$raw
+}
+
+function Add-ConfigNameToMap {
+    param($Map, [string]$Key, [string]$ConfigName)
+    if (-not $Key -or -not $ConfigName) { return }
+    $existingKey = $null
+    foreach ($k in @($Map.Keys)) {
+        if (Test-NameEquals $k $Key) { $existingKey = $k; break }
+    }
+    if ($null -eq $existingKey) {
+        $Map[$Key] = New-Object System.Collections.Generic.List[string]
+        $existingKey = $Key
+    }
+    foreach ($n in $Map[$existingKey]) {
+        if (Test-NameEquals $n $ConfigName) { return }
+    }
+    [void]$Map[$existingKey].Add($ConfigName)
+}
+
+function Get-ChosenNetworkProfileNames {
+    param($Choice)
+    $raw = @(Convert-ToStringArray (Get-ObjectProperty $Choice "networkProfiles"))
+    return @($raw | Where-Object { $script:NetworkProfileMap.Keys -contains $_ })
+}
+
+function Get-AutoSwitchNetworkConflicts {
+    param(
+        $Doc,
+        [string]$OverrideName = $null,
+        [string[]]$OverrideProfiles = $null
+    )
+    if ($null -eq $Doc) { $Doc = $script:AppSettingsCache }
+    $byProfile = @{}
+    $bySsid = @{}
+    $list = @(Get-ChosenList -Doc $Doc)
+    $i = 0
+    foreach ($choice in $list) {
+        $cname = Get-ChosenName -Choice $choice -Index $i
+        $profiles = @(Get-ChosenNetworkProfileNames -Choice $choice)
+        if ($OverrideName -and (Test-NameEquals $cname $OverrideName)) {
+            $profiles = @($OverrideProfiles | Where-Object { $script:NetworkProfileMap.Keys -contains $_ })
+        }
+        foreach ($profile in $profiles) {
+            Add-ConfigNameToMap -Map $byProfile -Key $profile -ConfigName $cname
+            foreach ($ssid in @($script:NetworkProfileMap[$profile])) {
+                Add-ConfigNameToMap -Map $bySsid -Key ([string]$ssid) -ConfigName $cname
+            }
+        }
+        $i++
+    }
+    $conflicts = New-Object System.Collections.Generic.List[object]
+    foreach ($profile in @($byProfile.Keys)) {
+        if ($byProfile[$profile].Count -gt 1) {
+            [void]$conflicts.Add([pscustomobject]@{
+                network = $profile
+                configs = @($byProfile[$profile])
+            })
+        }
+    }
+    foreach ($ssid in @($bySsid.Keys)) {
+        if ($bySsid[$ssid].Count -le 1) { continue }
+        $already = $false
+        foreach ($row in $conflicts) {
+            $ssids = @($script:NetworkProfileMap[$row.network])
+            if ($ssids.Count -gt 0 -and (Test-NameInList -Name $ssid -List $ssids)) {
+                $already = $true
+                break
+            }
+        }
+        if ($already) { continue }
+        [void]$conflicts.Add([pscustomobject]@{
+            network = "$ssid (SSID)"
+            configs = @($bySsid[$ssid])
+        })
+    }
+    if ($conflicts.Count -eq 0) { return @() }
+    return $conflicts.ToArray()
+}
+
+function Format-AutoSwitchConflictText {
+    param($Conflicts)
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($row in @($Conflicts)) {
+        [void]$lines.Add((Get-UiText AutoSwitchConflictLine $row.network ($row.configs -join ", ")))
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Find-AutoSwitchConfigName {
+    param(
+        $Doc,
+        [string[]]$ConnectedNames = $null
+    )
+    if ($null -eq $Doc) { $Doc = $script:AppSettingsCache }
+    if ($null -eq $ConnectedNames) { $ConnectedNames = @(Get-ConnectedNetworkNames) }
+    $matched = @(Get-MatchedNetworkProfiles -ConnectedNames $ConnectedNames)
+    if ($matched.Count -eq 0) { return $null }
+    $hits = New-Object System.Collections.Generic.List[string]
+    $list = @(Get-ChosenList -Doc $Doc)
+    $i = 0
+    foreach ($choice in $list) {
+        $cname = Get-ChosenName -Choice $choice -Index $i
+        foreach ($profile in @(Get-ChosenNetworkProfileNames -Choice $choice)) {
+            if (Test-NameInList -Name $profile -List $matched) {
+                $seen = $false
+                foreach ($h in $hits) {
+                    if (Test-NameEquals $h $cname) { $seen = $true; break }
+                }
+                if (-not $seen) { [void]$hits.Add($cname) }
+                break
+            }
+        }
+        $i++
+    }
+    if ($hits.Count -eq 1) { return $hits[0] }
+    return $null
+}
+
 function Get-UiLanguageCode {
     param($Settings)
     $lang = "en"
-    $choice = Get-ChosenSettings -Settings $Settings
-    if ($choice -and $null -ne $choice.language) {
-        $raw = ([string]$choice.language).ToLowerInvariant()
-        if ($raw -eq "nl" -or $raw -eq "nederlands" -or $raw -eq "dutch") { $lang = "nl" }
+    $raw = Get-DefinitionField -Settings $Settings -Name "language"
+    if ($null -ne $raw) {
+        $text = ([string]$raw).ToLowerInvariant()
+        if ($text -eq "nl" -or $text -eq "nederlands" -or $text -eq "dutch") { $lang = "nl" }
     }
     return $lang
 }
@@ -395,6 +919,14 @@ function Format-IdleDuration {
     param([int]$Seconds)
     if ($Seconds -lt 60) { return (Get-UiText DurSec $Seconds) }
     if (($Seconds % 60) -eq 0) { return (Get-UiText DurMin ([int]($Seconds / 60))) }
+    $m = [int][math]::Floor($Seconds / 60)
+    $s = $Seconds % 60
+    return (Get-UiText DurMinSec $m $s)
+}
+
+function Format-IdleDurationWithSeconds {
+    param([int]$Seconds)
+    if ($Seconds -lt 60) { return (Get-UiText DurSec $Seconds) }
     $m = [int][math]::Floor($Seconds / 60)
     $s = $Seconds % 60
     return (Get-UiText DurMinSec $m $s)
@@ -413,7 +945,7 @@ function Get-DefaultIdlePresets {
 }
 
 function Get-IdlePresets {
-    if ($null -eq $script:IdlePresets) { Read-AppSettingsFile }
+    if ($null -eq $script:IdlePresets) { [void](Read-AppSettingsFile) }
     if ($script:IdlePresets -and $script:IdlePresets.Count -gt 0) { return @($script:IdlePresets) }
     return Get-DefaultIdlePresets
 }
@@ -428,7 +960,8 @@ $script:LastNetKBps = $null
 $script:QuietSamples = New-Object System.Collections.Generic.List[object]
 $script:LastQuietSampleUtc = [datetime]::MinValue
 $script:LastSampleStampUtc = $null
-$script:ConsecutiveQuietSec = 0.0
+$script:QuietWindowStartUtc = [datetime]::MinValue
+$script:QuietWindowSeconds = 0
 $script:LastIdleResetReason = $null
 
 function Get-DefaultQuietConfig {
@@ -470,13 +1003,18 @@ function Apply-QuietDoc {
 
 function Get-QuietConfig {
     if ($null -ne $script:QuietConfig) { return $script:QuietConfig }
-    Read-AppSettingsFile
+    [void](Read-AppSettingsFile)
     return $script:QuietConfig
 }
 
 function Save-QuietConfig {
-    if (-not $script:AppSettingsLoaded) { Read-AppSettingsFile }
-    Write-AppSettingsFile
+    if (-not $script:AppSettingsLoaded) { [void](Read-AppSettingsFile) }
+    if ($script:state) {
+        Write-AppSettingsFile -State $script:state
+    }
+    else {
+        Write-AppSettingsFile
+    }
 }
 
 function Get-QuietStep {
@@ -631,13 +1169,22 @@ function Get-QuietStatus {
     if ($count -gt 0) { $ratio = $quietN / $count }
     $minSamples = 4
     $windowMet = ($count -ge $minSamples) -and ($ratio -ge [double]$cfg.minQuietRatio)
+    # Seconds we have been watching an idle machine without a break in sampling. Read
+    # from a timestamp so a slow tick can never make it lag behind the clock.
+    $windowSec = 0
+    $windowFull = $false
+    if ($script:QuietWindowStartUtc -ne [datetime]::MinValue) {
+        $windowSec = [int][math]::Floor(([datetime]::UtcNow - $script:QuietWindowStartUtc).TotalSeconds)
+        $windowFull = ($windowSec -ge [int]$script:QuietWindowSeconds)
+    }
     $waiting = $null
+    $busyNow = $false
     $anyCheck = [bool]$cfg.checkCpu -or [bool]$cfg.checkDisk -or [bool]$cfg.checkNet
     if ($anyCheck) {
-        if ([bool]$cfg.checkCpu -and $null -ne $script:LastCpu -and $script:LastCpu -ge $cfg.cpuBusyPercent) { $waiting = "CPU" }
-        elseif ([bool]$cfg.checkDisk -and $null -ne $script:LastDisk -and $script:LastDisk -ge $cfg.diskBusyPercent) { $waiting = "disk" }
-        elseif ([bool]$cfg.checkNet -and $null -ne $script:LastNetKBps -and $script:LastNetKBps -ge $cfg.netBusyKBps) { $waiting = "net" }
-        elseif (-not $windowMet) { $waiting = "quiet" }
+        if ([bool]$cfg.checkCpu -and $null -ne $script:LastCpu -and $script:LastCpu -ge $cfg.cpuBusyPercent) { $waiting = "CPU"; $busyNow = $true }
+        elseif ([bool]$cfg.checkDisk -and $null -ne $script:LastDisk -and $script:LastDisk -ge $cfg.diskBusyPercent) { $waiting = "disk"; $busyNow = $true }
+        elseif ([bool]$cfg.checkNet -and $null -ne $script:LastNetKBps -and $script:LastNetKBps -ge $cfg.netBusyKBps) { $waiting = "net"; $busyNow = $true }
+        elseif (-not $windowMet -or -not $windowFull) { $waiting = "quiet" }
     }
     if (-not $anyCheck) { $windowMet = $true }
     return [pscustomobject]@{
@@ -654,7 +1201,10 @@ function Get-QuietStatus {
         minRatio            = [double]$cfg.minQuietRatio
         sampleCount         = $count
         windowMet           = $windowMet
-        consecutiveQuietSec = [int][math]::Floor($script:ConsecutiveQuietSec)
+        windowFull          = $windowFull
+        busyNow             = $busyNow
+        quietWindowSec      = $windowSec
+        quietWindowNeedSec  = [int]$script:QuietWindowSeconds
         waiting             = $waiting
     }
 }
@@ -664,6 +1214,7 @@ function Update-QuietSample {
         [int]$WindowSeconds = 10,
         [bool]$InputIsIdle = $true
     )
+    $script:QuietWindowSeconds = [math]::Max(5, $WindowSeconds)
     $now = [datetime]::UtcNow
     if ($script:LastQuietSampleUtc -ne [datetime]::MinValue -and ($now - $script:LastQuietSampleUtc).TotalMilliseconds -lt 350) {
         return Get-QuietStatus -WindowSeconds $WindowSeconds
@@ -679,34 +1230,20 @@ function Update-QuietSample {
     $anyCheck = [bool]$cfg.checkCpu -or [bool]$cfg.checkDisk -or [bool]$cfg.checkNet
     $sampleQuiet = -not $anyCheck -or (-not $cpuBusy -and -not $diskBusy -and -not $netBusy)
     $script:LastQuietSampleUtc = $now
-    $cpuTxt = [int][math]::Round($busy.Cpu, 0)
-    $diskTxt = [int][math]::Round($busy.Disk, 0)
-    $netTxt = Format-KBpsValue $busy.NetKBps
-    $cpuLim = [int][math]::Round([double]$cfg.cpuBusyPercent, 0)
-    $diskLim = [int][math]::Round([double]$cfg.diskBusyPercent, 0)
-    $netLim = [int][math]::Round([double]$cfg.netBusyKBps, 0)
     if (-not $InputIsIdle) {
-        $script:LastIdleResetReason = Get-UiText ResetKeyboard
+        $script:LastIdleResetReason = Get-InputResetReasonText
         $script:QuietSamples.Clear()
-        $script:ConsecutiveQuietSec = 0.0
+        $script:QuietWindowStartUtc = $now
         $script:LastSampleStampUtc = $now
         return Get-QuietStatus -WindowSeconds $WindowSeconds
     }
-    if (-not $sampleQuiet) {
-        if ($cpuBusy) {
-            $script:LastIdleResetReason = Get-UiText ResetCpu $cpuTxt $cpuLim
-        }
-        elseif ($diskBusy) {
-            $script:LastIdleResetReason = Get-UiText ResetDisk $diskTxt $diskLim
-        }
-        else {
-            $script:LastIdleResetReason = Get-UiText ResetNet $netTxt $netLim
-        }
+    # A break in sampling (pause, resume from suspend, a stalled tick) leaves no evidence
+    # for that stretch, so drop the stale samples and start the window over.
+    if ($null -ne $script:LastSampleStampUtc -and ($now - $script:LastSampleStampUtc).TotalSeconds -gt 5) {
+        $script:QuietSamples.Clear()
+        $script:QuietWindowStartUtc = $now
     }
-    $intervalSec = 0.5
-    if ($null -ne $script:LastSampleStampUtc) {
-        $intervalSec = [math]::Min(2.0, [math]::Max(0.3, ($now - $script:LastSampleStampUtc).TotalSeconds))
-    }
+    if ($script:QuietWindowStartUtc -eq [datetime]::MinValue) { $script:QuietWindowStartUtc = $now }
     $script:LastSampleStampUtc = $now
     [void]$script:QuietSamples.Add([pscustomobject]@{
         Utc   = $now
@@ -714,8 +1251,6 @@ function Update-QuietSample {
         Disk  = $busy.Disk
         Quiet = $sampleQuiet
     })
-    if ($sampleQuiet) { $script:ConsecutiveQuietSec += $intervalSec }
-    else { $script:ConsecutiveQuietSec = 0.0 }
     $cut = $now.AddSeconds(-[math]::Max(5, $WindowSeconds))
     while ($script:QuietSamples.Count -gt 0 -and $script:QuietSamples[0].Utc -lt $cut) {
         $script:QuietSamples.RemoveAt(0)
@@ -891,10 +1426,13 @@ function Read-AppSettingsFile {
     }
     $defs = Get-DefinitionSettings -Doc $doc
     $choice = Get-ChosenSettings -Settings $doc
-    if ($defs -and $defs.quiet) {
+    if ($defs -and (Get-ObjectProperty $defs "quiet")) {
         $cfg = Apply-QuietDoc -Doc $defs.quiet -Cfg $cfg
     }
-    if ($choice -and $choice.quiet) {
+    if ($choice) {
+        $cfg = Apply-QuietDoc -Doc $choice -Cfg $cfg
+    }
+    if ($choice -and (Get-ObjectProperty $choice "quiet")) {
         $cfg = Apply-QuietDoc -Doc $choice.quiet -Cfg $cfg
     }
     $presets = Convert-PresetsFromDoc -Doc $doc
@@ -905,6 +1443,57 @@ function Read-AppSettingsFile {
     $script:AppSettingsCache = $doc
     $script:AppSettingsLoaded = $true
     return $doc
+}
+
+function New-ChosenWriteObject {
+    param(
+        $Source,
+        [string]$Name,
+        $Cfg
+    )
+    $quietFromCaller = $null -ne $Cfg
+    if ($null -eq $Cfg) { $Cfg = Get-DefaultQuietConfig }
+    $idleSec = 600
+    $requireQuiet = $true
+    $power = @()
+    $profiles = @()
+    $action = "hibernate"
+    if ($Source) {
+        $idleSec = Get-IdleSecondsFromSettings -Settings $Source
+        $rq = Get-ObjectProperty $Source "requireQuiet"
+        if ($null -ne $rq) { $requireQuiet = [bool]$rq }
+        $power = @(Get-SelectedPowerSources -Settings $Source)
+        $profiles = @(Convert-ToStringArray (Get-ObjectProperty $Source "networkProfiles"))
+        $action = Get-NormalizedAction -Settings $Source
+        if (-not $quietFromCaller) {
+            $quietDoc = Get-ObjectProperty $Source "quiet"
+            if ($quietDoc) { $Cfg = Apply-QuietDoc -Doc $quietDoc -Cfg $Cfg }
+            $Cfg = Apply-QuietDoc -Doc $Source -Cfg $Cfg
+        }
+    }
+    $reasons = Get-IdleResetReasons -Settings $Source
+    $quiet = [ordered]@{
+        minQuietRatio   = [double]$Cfg.minQuietRatio
+        cpuBusyPercent  = [int][math]::Round([double]$Cfg.cpuBusyPercent, 0)
+        diskBusyPercent = [int][math]::Round([double]$Cfg.diskBusyPercent, 0)
+        netBusyKBps     = [int][math]::Round([double]$Cfg.netBusyKBps, 0)
+        checkCpu        = [bool]$Cfg.checkCpu
+        checkDisk       = [bool]$Cfg.checkDisk
+        checkNet        = [bool]$Cfg.checkNet
+    }
+    return [ordered]@{
+        name            = $Name
+        idleSeconds     = $idleSec
+        requireQuiet    = [bool]$requireQuiet
+        action          = $action
+        powerSources    = @($power)
+        networkProfiles = @($profiles)
+        resetReasons    = [ordered]@{
+            keyboard = [bool]$reasons.keyboard
+            mouse    = [bool]$reasons.mouse
+        }
+        quiet           = $quiet
+    }
 }
 
 function Write-AppSettingsFile {
@@ -924,61 +1513,64 @@ function Write-AppSettingsFile {
             seconds = [int]$p.seconds
         }
     }
-    $idleSec = 600
-    $requireQuiet = $true
-    $debugMode = $false
-    $debugRetentionHours = 1
-    $language = "en"
-    $power = @()
-    $profiles = @()
-    $action = "hibernate"
-    $source = $null
-    if ($State) { $source = $State }
-    elseif ($script:AppSettingsCache) { $source = $script:AppSettingsCache }
-    $choice = Get-ChosenSettings -Settings $source
-    if ($choice) {
-        $idleSec = Get-IdleSecondsFromSettings -Settings $choice
-        if ($null -ne $choice.requireQuiet) { $requireQuiet = [bool]$choice.requireQuiet }
-        if ($null -ne $choice.debugMode) { $debugMode = [bool]$choice.debugMode }
-        $debugRetentionHours = Get-DebugRetentionHours -Settings $choice
-        $language = Get-UiLanguageCode -Settings $choice
-        $power = @(Get-SelectedPowerSources -Settings $choice)
-        $profiles = @(Convert-ToStringArray $choice.networkProfiles)
-        $action = Get-NormalizedAction -Settings $choice
-    }
-    $networkObj = [pscustomobject]$network
-    $chosen = [ordered]@{
-        idleSeconds          = $idleSec
-        requireQuiet         = [bool]$requireQuiet
-        debugMode            = [bool]$debugMode
-        debugRetentionHours  = [int]$debugRetentionHours
-        language             = $language
-        action               = $action
-        powerSources    = @($power)
-        networkProfiles = @($profiles)
-        quiet            = [pscustomobject]@{
-            cpuBusyPercent  = [int][math]::Round([double]$cfg.cpuBusyPercent, 0)
-            diskBusyPercent = [int][math]::Round([double]$cfg.diskBusyPercent, 0)
-            netBusyKBps     = [int][math]::Round([double]$cfg.netBusyKBps, 0)
-            checkCpu        = [bool]$cfg.checkCpu
-            checkDisk       = [bool]$cfg.checkDisk
-            checkNet        = [bool]$cfg.checkNet
+    $doc = $script:AppSettingsCache
+    $existing = @(Get-ChosenList -Doc $doc)
+    $selectedName = Get-SelectedChosenName -Settings $(if ($State) { $State } else { $doc })
+    $activeSource = $State
+    if (-not $activeSource) { $activeSource = Get-ChosenSettings -Settings $doc }
+    $active = New-ChosenWriteObject -Source $activeSource -Name $selectedName -Cfg $cfg
+
+    $chosenOut = New-Object System.Collections.Generic.List[object]
+    $replaced = $false
+    $i = 0
+    foreach ($item in $existing) {
+        $itemName = Get-ChosenName -Choice $item -Index $i
+        if (-not $replaced -and (Test-NameEquals $itemName $selectedName)) {
+            [void]$chosenOut.Add($active)
+            $replaced = $true
         }
-    }
-    $payload = [pscustomobject]@{
-        definitions = [pscustomobject]@{
-            network = $networkObj
-            presets = @($presetObjs)
-            quiet   = [pscustomobject]@{
-                minQuietRatio   = [double]$cfg.minQuietRatio
-                cpuStepPercent  = [int]$cfg.cpuStepPercent
-                diskStepPercent = [int]$cfg.diskStepPercent
-                netStepKBps     = [int]$cfg.netStepKBps
-            }
+        else {
+            $itemCfg = Get-DefaultQuietConfig
+            $itemCfg = Apply-QuietDoc -Doc $item -Cfg $itemCfg
+            $itemQuiet = Get-ObjectProperty $item "quiet"
+            if ($itemQuiet) { $itemCfg = Apply-QuietDoc -Doc $itemQuiet -Cfg $itemCfg }
+            [void]$chosenOut.Add((New-ChosenWriteObject -Source $item -Name $itemName -Cfg $itemCfg))
         }
-        chosen = [pscustomobject]$chosen
+        $i++
     }
-    (Add-JsoncLineComments ($payload | ConvertTo-Json -Depth 8)) | Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
+    if (-not $replaced -and $chosenOut.Count -eq 0) {
+        [void]$chosenOut.Add($active)
+    }
+
+    $debugMode = Get-DebugModeEnabled -Settings $(if ($State) { $State } else { $doc })
+    $autoSwitch = Get-AutoSwitchEnabled -Settings $(if ($State) { $State } else { $doc })
+    $warnSeconds = Get-WarnSeconds -Settings $(if ($State) { $State } else { $doc })
+    $debugRetentionHours = Get-DebugRetentionHours -Settings $(if ($State) { $State } else { $doc })
+    $debugFlushSeconds = Get-DebugFlushSeconds -Settings $(if ($State) { $State } else { $doc })
+    $language = Get-UiLanguageCode -Settings $(if ($State) { $State } else { $doc })
+
+    $defQuiet = [ordered]@{
+        cpuStepPercent  = [int]$cfg.cpuStepPercent
+        diskStepPercent = [int]$cfg.diskStepPercent
+        netStepKBps     = [int]$cfg.netStepKBps
+    }
+    $definitions = [ordered]@{
+        network             = [pscustomobject]$network
+        presets             = @($presetObjs)
+        quiet               = $defQuiet
+        language            = $language
+        debugMode           = [bool]$debugMode
+        autoSwitch          = [bool]$autoSwitch
+        warnSeconds         = [int]$warnSeconds
+        debugRetentionHours = [int]$debugRetentionHours
+        debugFlushSeconds   = [int]$debugFlushSeconds
+        selected            = $selectedName
+    }
+    $payload = [ordered]@{
+        definitions = $definitions
+        chosen      = @($chosenOut.ToArray())
+    }
+    (ConvertTo-JsoncText -Value $payload -Comments $script:JsoncLineComments) | Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
     $script:AppSettingsCache = Read-JsonFile -Path $script:SettingsPath
 }
 
@@ -1108,7 +1700,9 @@ function Get-IdleEvaluation {
     $quietRequired = $true
     if ($null -ne $choice -and $null -ne $choice.requireQuiet) { $quietRequired = [bool]$choice.requireQuiet }
     if (-not (Test-AnyQuietMetricEnabled)) { $quietRequired = $false }
-    $quietMet = (-not $quietRequired) -or [bool]$quiet.windowMet
+    # Tolerate brief spikes over the window (minQuietRatio), but never suspend while a
+    # metric is over its limit right now, and not before the window has actually elapsed.
+    $quietMet = (-not $quietRequired) -or ([bool]$quiet.windowMet -and [bool]$quiet.windowFull -and -not [bool]$quiet.busyNow)
     $connected = @(Get-ConnectedNetworkNames)
     $selected = @(Get-SelectedNetworkProfiles -Settings $Settings)
     $matched = @(Get-MatchedNetworkProfiles -ConnectedNames $connected)
@@ -1128,6 +1722,8 @@ function Get-IdleEvaluation {
     $willProceed = (-not $Paused) -and $idleHit -and $powerMet -and $networkMet -and $quietMet
     return [pscustomobject]@{
         at               = [datetimeoffset]::Now.ToString("o")
+        appVersion       = $script:AppVersion
+        appHash          = $script:AppSourceHash
         idleSeconds      = $needSec
         idleLabel        = Format-IdleDuration -Seconds $needSec
         idleMs           = $IdleMs
@@ -1154,6 +1750,11 @@ function Get-IdleEvaluation {
         quietRatio       = $quiet.ratio
         quietMinRatio    = $quiet.minRatio
         quietWaiting     = $quiet.waiting
+        quietWindowSec   = $quiet.quietWindowSec
+        quietWindowNeed  = $quiet.quietWindowNeedSec
+        quietWindowMet   = [bool]$quiet.windowMet
+        quietWindowFull  = [bool]$quiet.windowFull
+        quietBusyNow     = [bool]$quiet.busyNow
         selectedProfiles = @($selected)
         matchedProfiles  = @($matched)
         connected        = @($connected)
@@ -1201,38 +1802,14 @@ function Get-IdleDebugStatusLog {
 
 function Write-IdleDebugStatus {
     param($Evaluation, $Settings)
-    try {
-        if (-not (Test-Path -LiteralPath $script:DataDir)) {
-            New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
-        }
-        $hours = Get-DebugRetentionHours -Settings $Settings
-        $cutoff = [datetimeoffset]::Now.AddHours(-$hours)
-        $items = New-Object System.Collections.Generic.List[object]
-        if ($Evaluation) { [void]$items.Add($Evaluation) }
-        foreach ($item in @(Get-IdleDebugStatusLog)) {
-            $at = $null
-            try {
-                if ($null -ne $item.at) {
-                    $at = [datetimeoffset]::Parse([string]$item.at)
-                }
-            }
-            catch { }
-            if ($null -ne $at -and $at -ge $cutoff) {
-                [void]$items.Add($item)
+    if (Get-Command Add-DebugSample -ErrorAction SilentlyContinue) {
+        Add-DebugSample -Evaluation $Evaluation
+        if ($Evaluation -and ($Evaluation.willProceed -or $Evaluation.willHibernate)) {
+            if (Get-Command Save-DebugSampleBuffer -ErrorAction SilentlyContinue) {
+                Save-DebugSampleBuffer -Settings $Settings
             }
         }
-        $parts = New-Object System.Collections.Generic.List[string]
-        $texts = New-Object System.Collections.Generic.List[string]
-        foreach ($item in $items) {
-            [void]$parts.Add(($item | ConvertTo-Json -Compress -Depth 8))
-            [void]$texts.Add((Format-DebugText -Evaluation $item))
-        }
-        $json = '{ "items": [' + ($parts -join ',') + '] }'
-        Set-Content -LiteralPath $script:DebugStatusJsonPath -Value $json -Encoding UTF8
-        $blockSep = [Environment]::NewLine + [Environment]::NewLine + "==========" + [Environment]::NewLine + [Environment]::NewLine
-        Set-Content -LiteralPath $script:DebugStatusPath -Value ($texts -join $blockSep) -Encoding UTF8
     }
-    catch { }
 }
 
 function Add-HibernateHistory {
@@ -1323,6 +1900,12 @@ function Format-MetLabel {
     return Get-UiText NotMet
 }
 
+function Test-DebugMetricUnderLimit {
+    param($Actual, $Limit)
+    if ($null -eq $Actual -or $null -eq $Limit) { return $false }
+    return ([double]$Actual -lt [double]$Limit)
+}
+
 function Format-DebugText {
     param($Evaluation)
     if (-not $Evaluation) {
@@ -1337,26 +1920,31 @@ function Format-DebugText {
     else {
         [void]$lines.Add((Get-UiText DebugResult (Get-UiText DebugBlocked)))
     }
+    if ($Evaluation.appVersion -or $Evaluation.appHash) {
+        $ver = [string]$Evaluation.appVersion
+        if (-not $ver) { $ver = "?" }
+        $hash = [string]$Evaluation.appHash
+        if ($hash) {
+            [void]$lines.Add((Get-UiText DebugVersion $ver ($hash.Substring(0, [math]::Min(7, $hash.Length)))))
+        }
+        else {
+            [void]$lines.Add((Get-UiText Version $ver))
+        }
+    }
     [void]$lines.Add("")
     $actual = "?"
     if ($null -ne $Evaluation.idleMs) {
-        $actualSec = ([double]$Evaluation.idleMs) / 1000.0
-        if ($actualSec -lt 90) {
-            $actual = Get-UiText DurSec ([math]::Round($actualSec, 1))
-        }
-        else {
-            $actual = Get-UiText DurMin ([math]::Round($actualSec / 60.0, 1))
-        }
+        $actual = Format-IdleDurationWithSeconds -Seconds ([int][math]::Floor(([double]$Evaluation.idleMs) / 1000.0))
     }
     $idleLabel = $null
     if ($null -ne $Evaluation.idleSeconds) {
-        $idleLabel = Format-IdleDuration -Seconds ([int]$Evaluation.idleSeconds)
+        $idleLabel = Format-IdleDurationWithSeconds -Seconds ([int]$Evaluation.idleSeconds)
     }
     elseif ($Evaluation.idleLabel) {
         $idleLabel = [string]$Evaluation.idleLabel
     }
     else {
-        $idleLabel = Format-IdleDuration -Seconds (Get-IdleSecondsFromSettings -Settings $Evaluation)
+        $idleLabel = Format-IdleDurationWithSeconds -Seconds (Get-IdleSecondsFromSettings -Settings $Evaluation)
     }
     [void]$lines.Add((Get-UiText DebugIdleLine $idleLabel (Format-MetLabel ([bool]$Evaluation.idleHit)) $actual))
     if ($Evaluation.paused) {
@@ -1394,7 +1982,7 @@ function Format-DebugText {
         if ($Evaluation.checkCpu) {
             $cpu = "?"
             if ($null -ne $Evaluation.cpuPercent) { $cpu = [math]::Round([double]$Evaluation.cpuPercent, 0).ToString() + "%" }
-            [void]$lines.Add((Get-UiText DebugCpuActual $cpu $Evaluation.cpuLimit))
+            [void]$lines.Add((Get-UiText DebugCpuActual $cpu $Evaluation.cpuLimit (Format-MetLabel (Test-DebugMetricUnderLimit $Evaluation.cpuPercent $Evaluation.cpuLimit))))
         }
         else {
             [void]$lines.Add((Get-UiText DebugCpuNotChecked))
@@ -1402,7 +1990,7 @@ function Format-DebugText {
         if ($Evaluation.checkDisk) {
             $disk = "?"
             if ($null -ne $Evaluation.diskPercent) { $disk = [math]::Round([double]$Evaluation.diskPercent, 0).ToString() + "%" }
-            [void]$lines.Add((Get-UiText DebugDiskActual $disk $Evaluation.diskLimit))
+            [void]$lines.Add((Get-UiText DebugDiskActual $disk $Evaluation.diskLimit (Format-MetLabel (Test-DebugMetricUnderLimit $Evaluation.diskPercent $Evaluation.diskLimit))))
         }
         else {
             [void]$lines.Add((Get-UiText DebugDiskNotChecked))
@@ -1410,14 +1998,36 @@ function Format-DebugText {
         if ($Evaluation.checkNet) {
             $net = "?"
             if ($null -ne $Evaluation.netKBps) { $net = (Format-KBpsValue ([double]$Evaluation.netKBps)) + " KB/s" }
-            [void]$lines.Add((Get-UiText DebugNetActual $net $Evaluation.netLimitKBps))
+            [void]$lines.Add((Get-UiText DebugNetActual $net $Evaluation.netLimitKBps (Format-MetLabel (Test-DebugMetricUnderLimit $Evaluation.netKBps $Evaluation.netLimitKBps))))
         }
         else {
             [void]$lines.Add((Get-UiText DebugNetNotChecked))
         }
-        $ratio = "?"
-        if ($null -ne $Evaluation.quietRatio) { $ratio = [math]::Round(100.0 * [double]$Evaluation.quietRatio, 0).ToString() + "%" }
-        [void]$lines.Add((Get-UiText DebugQuietSamples $ratio))
+        $ratioPct = 0
+        $minPct = 0
+        if ($null -ne $Evaluation.quietRatio) { $ratioPct = [int][math]::Round(100.0 * [double]$Evaluation.quietRatio, 0) }
+        if ($null -ne $Evaluation.quietMinRatio) { $minPct = [int][math]::Round(100.0 * [double]$Evaluation.quietMinRatio, 0) }
+        $samplesMet = $false
+        if ($null -ne $Evaluation.quietWindowMet) {
+            $samplesMet = [bool]$Evaluation.quietWindowMet
+        }
+        elseif ($null -ne $Evaluation.quietRatio -and $null -ne $Evaluation.quietMinRatio) {
+            $samplesMet = ([double]$Evaluation.quietRatio -ge [double]$Evaluation.quietMinRatio)
+        }
+        $needSec = 0
+        $haveSec = 0
+        if ($null -ne $Evaluation.quietWindowNeed) { $needSec = [int]$Evaluation.quietWindowNeed }
+        if ($null -ne $Evaluation.quietWindowSec) { $haveSec = [int]$Evaluation.quietWindowSec }
+        $windowMet = $false
+        if ($null -ne $Evaluation.quietWindowFull) {
+            $windowMet = [bool]$Evaluation.quietWindowFull
+        }
+        elseif ($needSec -gt 0) {
+            $windowMet = ($haveSec -ge $needSec)
+        }
+        [void]$lines.Add((Get-UiText DebugQuietRatioWindow (Format-MetLabel ($samplesMet -and $windowMet))))
+        [void]$lines.Add((Get-UiText DebugQuietSamples $ratioPct $minPct (Format-MetLabel $samplesMet)))
+        [void]$lines.Add((Get-UiText DebugQuietWindow $haveSec $needSec (Format-MetLabel $windowMet)))
     }
     else {
         [void]$lines.Add((Get-UiText DebugQuietNotRequired))
@@ -1431,9 +2041,12 @@ function Format-DebugText {
         [void]$lines.Add((Get-UiText DebugNetworkNotRequired $actualNet))
     }
     else {
+        # Any one selected profile matching is enough, so the group line carries the verdict
+        # while the rows below show which profile supplied it.
+        [void]$lines.Add((Get-UiText DebugNetworkRequired (Format-MetLabel ([bool]$Evaluation.networkMet)) $actualNet))
         foreach ($profile in $selected) {
             $ssids = @($script:NetworkProfileMap[$profile]) -join " $(Get-UiText Or) "
-            [void]$lines.Add((Get-UiText DebugNetworkProfile $profile $ssids (Format-MetLabel ($matched -contains $profile)) $actualNet))
+            [void]$lines.Add((Get-UiText DebugNetworkProfile $profile $ssids (Format-MetLabel ($matched -contains $profile))))
         }
     }
     return ($lines -join [Environment]::NewLine)

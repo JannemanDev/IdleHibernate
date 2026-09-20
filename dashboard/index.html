@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IdleHibernate debug</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>IdleHibernate</h1>
+      <p class="sub">
+        Debug samples from the local SQLite log
+        <span id="debug-state" class="pill off">Debug mode: …</span>
+        <span id="last-action" class="pill">Last fired: …</span>
+      </p>
+      <p class="path" id="db-path"></p>
+    </div>
+    <div class="controls">
+      <label class="switch">
+        <input type="checkbox" id="autorefresh">
+        <span>Auto-refresh</span>
+      </label>
+      <div class="ranges" id="ranges"></div>
+    </div>
+  </header>
+  <section class="kpis" id="kpis"></section>
+  <section class="charts">
+    <figure>
+      <figcaption>Idle time (sec) vs limit</figcaption>
+      <canvas id="chart-idle"></canvas>
+    </figure>
+    <figure>
+      <figcaption>CPU % vs limit</figcaption>
+      <canvas id="chart-cpu"></canvas>
+    </figure>
+    <figure>
+      <figcaption>Disk % vs limit</figcaption>
+      <canvas id="chart-disk"></canvas>
+    </figure>
+    <figure>
+      <figcaption>Network KB/s vs limit</figcaption>
+      <canvas id="chart-net"></canvas>
+    </figure>
+  </section>
+  <section class="table-wrap">
+    <div class="table-head">
+      <h2>Samples</h2>
+      <div class="pager">
+        <button type="button" id="page-older">Older</button>
+        <span id="table-meta"></span>
+        <button type="button" id="page-newer">Newer</button>
+      </div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Config</th>
+            <th class="num">Idle</th>
+            <th>Quiet</th>
+            <th>Power</th>
+            <th>Network</th>
+            <th class="num">CPU %</th>
+            <th class="num">Disk %</th>
+            <th class="num">Network KB/s</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
