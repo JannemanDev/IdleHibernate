@@ -155,9 +155,33 @@ catch { }
     Write-TrayCrash $e.ExceptionObject
 })
 
-. (Join-Path $PSScriptRoot "Common.ps1")
-. (Join-Path $PSScriptRoot "DebugStore.ps1")
-. (Join-Path $PSScriptRoot "DashboardServer.ps1")
+function Write-TrayStartStatus([string]$Status) {
+    try {
+        $dir = Join-Path $env:LOCALAPPDATA "IdleHibernate"
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $path = Join-Path $dir "start-status.txt"
+        Set-Content -LiteralPath $path -Value $Status -Encoding ASCII
+        $log = Join-Path $dir "start-tray.log"
+        $line = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") + "  tray: " + $Status
+        Add-Content -LiteralPath $log -Value $line -Encoding UTF8
+    }
+    catch { }
+}
+
+try {
+    . (Join-Path $PSScriptRoot "Common.ps1")
+    . (Join-Path $PSScriptRoot "DebugStore.ps1")
+    . (Join-Path $PSScriptRoot "DashboardServer.ps1")
+}
+catch {
+    $msg = [string]$_
+    try { if ($_.Exception) { $msg = [string]$_.Exception.Message } } catch { }
+    Write-TrayStartStatus ("error:" + $msg)
+    try { Write-TrayCrash $_ } catch { }
+    exit 1
+}
 
 $mutex = New-Object System.Threading.Mutex($false, "Local\IdleHibernateTray")
 $owned = $false
@@ -167,7 +191,10 @@ try {
 catch [System.Threading.AbandonedMutexException] {
     $owned = $true
 }
-if (-not $owned) { exit 0 }
+if (-not $owned) {
+    Write-TrayStartStatus "already"
+    exit 0
+}
 
 $script:flagDir = Join-Path $env:LOCALAPPDATA "IdleHibernate"
 $script:flagPath = Join-Path $script:flagDir "paused"
@@ -1962,6 +1989,7 @@ $script:readyTimer.Add_Tick({
         try { Initialize-QuietCounters } catch { }
         $script:uiReady = $true
         $script:notify.Visible = $true
+        Write-TrayStartStatus "started"
         $timer.Start()
         try { [void](Start-DebugDashboard) } catch { Write-TrayCrash $_ }
     }

@@ -15,10 +15,16 @@ It is a PowerShell 5.1 WinForms tray icon. Settings live in `settings.json` next
 Hidden start (no console window):
 
 ```text
-wscript.exe "C:\Users\Jan\Scripts\IdleHibernate\StartTray.vbs"
+wscript.exe StartTray.vbs
 ```
 
-`StartTray.vbs` starts `IdleHibernateTray.ps1` from the same folder.
+Or from the project folder:
+
+```text
+wscript StartTray.vbs
+```
+
+`StartTray.vbs` starts `IdleHibernateTray.ps1` from the same folder. It checks for PowerShell, the tray script, and `lib\Newtonsoft.Json.dll` / `lib\sqlite3.dll`, writes `%LOCALAPPDATA%\IdleHibernate\start-tray.log`, and shows a message with that log path (success, already running, or failure). Use `silent` or `delay` to skip the popup (restart uses `delay`).
 
 Only one tray instance runs at a time. Use **Restart tray icon** in the menu after you edit the scripts.
 
