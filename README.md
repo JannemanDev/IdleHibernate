@@ -18,7 +18,7 @@ Hidden start (no console window):
 wscript.exe "C:\Users\Jan\Scripts\IdleHibernate\StartTray.vbs"
 ```
 
-`StartTray.vbs` hardcodes the path to `IdleHibernateTray.ps1`. Change that path if you move the folder.
+`StartTray.vbs` starts `IdleHibernateTray.ps1` from the same folder.
 
 Only one tray instance runs at a time. Use **Restart tray icon** in the menu after you edit the scripts.
 
