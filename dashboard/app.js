@@ -68,9 +68,32 @@ function actionLabel(name) {
 
 function lastFiredSample(rows) {
   for (let i = rows.length - 1; i >= 0; i--) {
-    if (Number(rows[i].will_proceed)) return rows[i];
+    const r = rows[i];
+    const result = sampleResult(r);
+    if (result === "fired") return r;
   }
   return null;
+}
+
+function sampleResult(r) {
+  if (r.result) return String(r.result);
+  if (Number(r.will_proceed)) return "fired";
+  if (Number(r.paused)) return "paused";
+  return "block";
+}
+
+function resultHtml(r) {
+  const result = sampleResult(r);
+  if (result === "fired") {
+    return `<span class="ok">fired · ${actionLabel(r.action)}</span>`;
+  }
+  if (result === "warn") {
+    return `<span class="warn">warn · ${actionLabel(r.action)}</span>`;
+  }
+  if (result === "paused") {
+    return '<span class="muted">paused</span>';
+  }
+  return '<span class="bad">block</span>';
 }
 
 function applyLastAction(row) {
@@ -121,7 +144,33 @@ const chartDefaults = {
   }
 };
 
+function overLimitSegment(limit) {
+  const ok = "#3caf4a";
+  const bad = "#d13a3a";
+  return {
+    borderColor: (ctx) => {
+      const y0 = ctx.p0.parsed.y;
+      const y1 = ctx.p1.parsed.y;
+      const lim0 = limit[ctx.p0DataIndex];
+      const lim1 = limit[ctx.p1DataIndex];
+      const over0 = lim0 != null && y0 != null && Number.isFinite(y0) && y0 > lim0;
+      const over1 = lim1 != null && y1 != null && Number.isFinite(y1) && y1 > lim1;
+      return (over0 || over1) ? bad : ok;
+    }
+  };
+}
+
+function pointColors(actual, limit) {
+  const ok = "#3caf4a";
+  const bad = "#d13a3a";
+  return actual.map((y, i) => {
+    const lim = limit[i];
+    return (lim != null && y != null && Number.isFinite(y) && y > lim) ? bad : ok;
+  });
+}
+
 function upsertChart(id, labels, actual, limit, actualLabel, limitLabel) {
+  const colors = pointColors(actual, limit);
   const data = {
     labels,
     datasets: [
@@ -133,7 +182,10 @@ function upsertChart(id, labels, actual, limit, actualLabel, limitLabel) {
         fill: true,
         tension: 0.15,
         pointRadius: 0,
-        borderWidth: 2
+        borderWidth: 2,
+        segment: overLimitSegment(limit),
+        pointBackgroundColor: colors,
+        pointBorderColor: colors
       },
       {
         label: limitLabel,
@@ -147,8 +199,12 @@ function upsertChart(id, labels, actual, limit, actualLabel, limitLabel) {
     ]
   };
   if (charts[id]) {
+    const ds = charts[id].data.datasets[0];
     charts[id].data.labels = labels;
-    charts[id].data.datasets[0].data = actual;
+    ds.data = actual;
+    ds.segment = overLimitSegment(limit);
+    ds.pointBackgroundColor = colors;
+    ds.pointBorderColor = colors;
     charts[id].data.datasets[1].data = limit;
     charts[id].update("none");
     return;
@@ -218,14 +274,37 @@ async function load() {
   renderTable();
 }
 
-function resultHtml(r) {
-  if (Number(r.will_proceed)) {
-    return `<span class="ok">fired · ${actionLabel(r.action)}</span>`;
+const versionColorMap = new Map();
+
+function versionKey(r) {
+  if (r.app_hash) return String(r.app_hash);
+  if (r.app_version) return "v:" + String(r.app_version);
+  return "";
+}
+
+function colorForVersion(key) {
+  if (!key) return "var(--muted)";
+  if (versionColorMap.has(key)) return versionColorMap.get(key);
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  if (Number(r.paused)) {
-    return '<span class="muted">paused</span>';
-  }
-  return '<span class="bad">block</span>';
+  const hue = Math.abs(h) % 360;
+  const color = `hsl(${hue} 58% 68%)`;
+  versionColorMap.set(key, color);
+  return color;
+}
+
+function versionHashHtml(r) {
+  const ver = r.app_version ? String(r.app_version) : "";
+  const hash = r.app_hash ? String(r.app_hash) : "";
+  if (!ver && !hash) return "–";
+  const short = hash ? hash.slice(0, 7) : "";
+  const label = [ver, short].filter(Boolean).join(" · ");
+  const title = [ver ? `v${ver}` : "", hash].filter(Boolean).join(" ");
+  const color = colorForVersion(versionKey(r));
+  return `<span class="hash" title="${title}" style="color:${color}">${label}</span>`;
 }
 
 function sampleRowHtml(r) {
@@ -233,6 +312,7 @@ function sampleRowHtml(r) {
   return `<tr>
       <td>${fmtTime(r.at)}</td>
       <td>${r.chosen_name || ""}</td>
+      <td>${versionHashHtml(r)}</td>
       <td class="num">${idleSec}s ${met(r.idle_hit)}</td>
       <td>${met(r.quiet_met)}</td>
       <td>${met(r.power_met)}</td>
@@ -252,7 +332,7 @@ function renderTable() {
   if (!rows.length) {
     applyLastAction(null);
     $("table-meta").textContent = "no samples in this range";
-    body.innerHTML = `<tr><td class="empty" colspan="10">Debug mode writes samples into SQLite on a flush interval. Leave it on for a bit, then refresh.</td></tr>`;
+    body.innerHTML = `<tr><td class="empty" colspan="11">Debug mode writes samples into SQLite on a flush interval. Leave it on for a bit, then refresh.</td></tr>`;
     if (older) older.disabled = true;
     if (newer) newer.disabled = true;
     return;

@@ -99,7 +99,7 @@ function Start-DebugDashboard {
                     if ($limit -lt 1) { $limit = 1 }
                     if ($limit -gt 20000) { $limit = 20000 }
                     $cutoff = [datetimeoffset]::UtcNow.AddHours(-$hours).ToUnixTimeMilliseconds() / 1000.0
-                    $sql = "SELECT at, at_unix, app_version, app_hash, chosen_name, idle_seconds, idle_ms, idle_hit, paused, power_required, power_met, ac_met, network_required, network_met, quiet_required, quiet_met, cpu_percent, disk_percent, net_kbps, cpu_limit, disk_limit, net_limit_kbps, check_cpu, check_disk, check_net, quiet_ratio, quiet_min_ratio, quiet_window_sec, quiet_window_need, quiet_window_met, quiet_window_full, quiet_busy_now, action, will_proceed, connected FROM samples WHERE at_unix >= " + $cutoff.ToString([System.Globalization.CultureInfo]::InvariantCulture) + " ORDER BY at_unix ASC LIMIT " + $limit
+                    $sql = "SELECT at, at_unix, app_version, app_hash, chosen_name, idle_seconds, idle_ms, idle_hit, paused, power_required, power_met, ac_met, network_required, network_met, quiet_required, quiet_met, cpu_percent, disk_percent, net_kbps, cpu_limit, disk_limit, net_limit_kbps, check_cpu, check_disk, check_net, quiet_ratio, quiet_min_ratio, quiet_window_sec, quiet_window_need, quiet_window_met, quiet_window_full, quiet_busy_now, action, will_proceed, result, connected FROM samples WHERE at_unix >= " + $cutoff.ToString([System.Globalization.CultureInfo]::InvariantCulture) + " ORDER BY at_unix ASC LIMIT " + $limit
                     $rows = @()
                     if ($db) { $rows = @($db.Query($sql)) }
                     $json = $rows | ConvertTo-Json -Compress -Depth 6

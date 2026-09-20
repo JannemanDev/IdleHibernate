@@ -274,11 +274,13 @@ CREATE TABLE IF NOT EXISTS samples (
   quiet_busy_now INTEGER,
   action TEXT,
   will_proceed INTEGER,
+  result TEXT,
   connected TEXT,
   payload TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_samples_at_unix ON samples(at_unix);
 "@)
+    try { $script:DebugDb.Execute("ALTER TABLE samples ADD COLUMN result TEXT") } catch { }
     foreach ($old in @($script:DebugStatusPath, $script:DebugStatusJsonPath)) {
         if ($old -and (Test-Path -LiteralPath $old)) {
             try { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue } catch { }
@@ -333,10 +335,20 @@ function Convert-EvaluationToSampleRow($Evaluation) {
         (Convert-DebugBool $Evaluation.quietBusyNow),
         [string]$Evaluation.action,
         (Convert-DebugBool ($Evaluation.willProceed -or $Evaluation.willHibernate)),
+        (Get-DebugSampleResult $Evaluation),
         $connected,
         $payload
     )) { [void]$row.Add($v) }
     return $row
+}
+
+function Get-DebugSampleResult($Evaluation) {
+    $raw = $null
+    if ($Evaluation) { $raw = Get-ObjectProperty $Evaluation "result" }
+    if ($null -ne $raw -and [string]$raw) { return [string]$raw }
+    if ($Evaluation -and ($Evaluation.willProceed -or $Evaluation.willHibernate)) { return "fired" }
+    if ($Evaluation -and $Evaluation.paused) { return "paused" }
+    return "block"
 }
 
 function Add-DebugSample {
@@ -374,8 +386,8 @@ INSERT INTO samples (
   quiet_ratio, quiet_min_ratio,
   quiet_window_sec, quiet_window_need,
   quiet_window_met, quiet_window_full, quiet_busy_now,
-  action, will_proceed, connected, payload
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  action, will_proceed, result, connected, payload
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 "@
         $bindRows = New-Object System.Collections.Generic.List[object]
         foreach ($item in $rows) {
@@ -429,7 +441,7 @@ SELECT at, at_unix, app_version, app_hash, chosen_name,
        quiet_ratio, quiet_min_ratio,
        quiet_window_sec, quiet_window_need,
        quiet_window_met, quiet_window_full, quiet_busy_now,
-       action, will_proceed, connected
+       action, will_proceed, result, connected
 FROM samples
 WHERE at_unix >= $($cutoff.ToString([System.Globalization.CultureInfo]::InvariantCulture))
 ORDER BY at_unix ASC
@@ -479,6 +491,29 @@ function Clear-DebugSamples {
     Enter-DebugDbLock
     try { $script:DebugDb.Execute("DELETE FROM samples;") }
     finally { Exit-DebugDbLock }
+}
+
+function Get-DebugSampleCount {
+    $buffered = 0
+    Enter-DebugDbLock
+    try {
+        if ($script:DebugSampleBuffer) { $buffered = [int]$script:DebugSampleBuffer.Count }
+    }
+    finally { Exit-DebugDbLock }
+    $stored = 0
+    try {
+        Initialize-DebugStore
+        Enter-DebugDbLock
+        try {
+            $rows = @($script:DebugDb.Query("SELECT COUNT(*) AS count FROM samples"))
+            if ($rows.Count -gt 0 -and $null -ne $rows[0].count) {
+                $stored = [int64]$rows[0].count
+            }
+        }
+        finally { Exit-DebugDbLock }
+    }
+    catch { }
+    return [int64]($stored + $buffered)
 }
 
 function Close-DebugStore {

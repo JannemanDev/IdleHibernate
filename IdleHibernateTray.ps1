@@ -393,6 +393,7 @@ function Update-Tray {
         }
     }
     $script:actionMenu.Text = Get-UiText ActionMenu (Get-ActionLabel -Action $script:state.action)
+    Update-ActionSleepNote
     Update-WarnMenu
     Update-ConfigMenu
     if ($script:presetItems) {
@@ -483,7 +484,21 @@ function Start-IdleActionWarning($Evaluation) {
     $script:warnAction = Get-NormalizedAction -Settings $Evaluation
     $script:warnDeadlineUtc = [datetime]::UtcNow.AddSeconds($sec)
     $script:warnToastLeftShown = $null
+    if ([bool]$script:state.debugMode -and $Evaluation) {
+        Set-IdleDebugResult $Evaluation "warn"
+        Write-IdleDebugStatus -Evaluation $Evaluation -Settings $script:state
+    }
     Update-IdleActionWarningToast
+}
+
+function Set-IdleDebugResult($Evaluation, [string]$Result) {
+    if (-not $Evaluation) { return }
+    if ($null -ne $Evaluation.PSObject.Properties["result"]) {
+        $Evaluation.result = $Result
+    }
+    else {
+        $Evaluation | Add-Member -NotePropertyName result -NotePropertyValue $Result -Force
+    }
 }
 
 function Invoke-IdleActionNow($Evaluation) {
@@ -492,6 +507,7 @@ function Invoke-IdleActionNow($Evaluation) {
     $script:idleActionArmed = $false
     Clear-IdleActionWarning
     if ([bool]$script:state.debugMode) {
+        Set-IdleDebugResult $Evaluation "fired"
         Write-IdleDebugStatus -Evaluation $Evaluation -Settings $script:state
     }
     Add-HibernateHistory -Evaluation $Evaluation
@@ -876,6 +892,19 @@ function Update-WarnMenu {
     }
     else {
         $script:warnLabel.Text = Get-UiText WarnBefore (Format-IdleDurationWithSeconds -Seconds $sec)
+    }
+}
+
+function Update-ActionSleepNote {
+    if (-not $script:actionSleepNote) { return }
+    $note = $null
+    try { $note = Get-SleepCapabilityNote } catch { $note = $null }
+    if ($note) {
+        $script:actionSleepNote.Text = $note
+        $script:actionSleepNote.Visible = $true
+    }
+    else {
+        $script:actionSleepNote.Visible = $false
     }
 }
 
@@ -1396,6 +1425,10 @@ foreach ($act in (Get-KnownActions)) {
     $script:actionItems[$act] = $item
     [void]$script:actionMenu.DropDownItems.Add($item)
 }
+$script:actionSleepNote = New-Object System.Windows.Forms.ToolStripMenuItem ""
+$script:actionSleepNote.Enabled = $false
+$script:actionSleepNote.Visible = $false
+[void]$script:actionMenu.DropDownItems.Add($script:actionSleepNote)
 [void]$script:actionMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $script:warnLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText WarnBefore (Get-UiText WarnOff))
 $script:warnLabel.Enabled = $false
@@ -1407,6 +1440,8 @@ $script:warnDown.Add_Click({ Change-Warn -1 })
 [void]$script:actionMenu.DropDownItems.Add($script:warnUp)
 [void]$script:actionMenu.DropDownItems.Add($script:warnDown)
 Enable-KeepSubmenuOpen $script:actionMenu
+$script:actionMenu.DropDown.Add_Opening({ Update-ActionSleepNote; Update-WarnMenu })
+Update-ActionSleepNote
 Update-WarnMenu
 
 $script:historyMenu = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText LastActions)
@@ -1501,6 +1536,14 @@ function Write-CurrentDebugStatus {
     Update-IdleBaseline
     $idleMs = Get-EffectiveIdleMs
     $eval = Get-IdleEvaluation -Settings $script:state -Paused (Test-Paused) -IdleMs $idleMs -OnAc (Test-OnAc)
+    $result = "block"
+    if ([bool]$eval.paused) {
+        $result = "paused"
+    }
+    elseif ((Test-IdleWarningPending) -and ($eval.willProceed -or $eval.willHibernate)) {
+        $result = "warn"
+    }
+    Set-IdleDebugResult $eval $result
     Write-IdleDebugStatus -Evaluation $eval -Settings $script:state
     Update-DebugLogItem
 }
@@ -1554,6 +1597,13 @@ $script:debugLogItem.Add_Click({
     try { Show-DebugDashboard } catch { }
 })
 [void]$script:debugMenu.DropDownItems.Add($script:debugLogItem)
+$script:debugClearDbItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText ClearDebugDatabase 0)
+$script:debugClearDbItem.Add_Click({
+    $script:keepMenuOpen = $true
+    try { Clear-DebugSamples } catch { }
+    Update-DebugMenu
+})
+[void]$script:debugMenu.DropDownItems.Add($script:debugClearDbItem)
 [void]$script:debugMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $script:debugItems = New-Object System.Collections.Generic.List[System.Windows.Forms.ToolStripMenuItem]
 for ($i = 0; $i -lt 5; $i++) {
@@ -1580,6 +1630,7 @@ $script:debugClearItem.Add_Click({
 })
 [void]$script:debugMenu.DropDownItems.Add($script:debugClearItem)
 Enable-KeepSubmenuOpen $script:debugMenu
+$script:debugMenu.DropDown.Add_Opening({ Update-DebugMenu })
 
 function Update-DebugMenu {
     $entries = @(Get-IdleDebugLog)
@@ -1607,6 +1658,12 @@ function Update-DebugMenu {
     }
     if ($script:debugClearItem) {
         $script:debugClearItem.Enabled = ($entries.Count -gt 0)
+    }
+    if ($script:debugClearDbItem) {
+        $count = 0
+        try { $count = Get-DebugSampleCount } catch { $count = 0 }
+        $script:debugClearDbItem.Text = Get-UiText ClearDebugDatabase $count
+        $script:debugClearDbItem.Enabled = ($count -gt 0)
     }
     Update-DebugLogItem
 }

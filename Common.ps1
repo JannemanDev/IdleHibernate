@@ -18,8 +18,9 @@ public struct SystemPowerStatus {
     public int BatteryFullLifeTime;
 }
 public static class PowerStateNative {
+    // Use int (0/1), not bool: wrong marshalling of bool can make sleep and hibernate identical.
     [DllImport("powrprof.dll", SetLastError = true)]
-    public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
+    public static extern bool SetSuspendState(int hibernate, int forceCritical, int disableWakeEvent);
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetSystemPowerStatus(out SystemPowerStatus lpSystemPowerStatus);
 }
@@ -95,7 +96,14 @@ function Invoke-IdlePowerAction {
     param($Action)
     $name = Get-NormalizedAction -Settings ([pscustomobject]@{ action = $Action })
     switch ($name) {
-        "sleep" { [void][PowerStateNative]::SetSuspendState($false, $true, $false) }
+        "sleep" {
+            # 0 = sleep / Modern Standby (S0). Do not use rundll32; it ignores arguments.
+            [void][PowerStateNative]::SetSuspendState(0, 1, 0)
+        }
+        "hibernate" {
+            # Always use shutdown /h so hibernate cannot follow the sleep API path.
+            Start-Process -FilePath "shutdown.exe" -ArgumentList @("/h") -WindowStyle Hidden
+        }
         "lock" {
             $locked = $false
             try { $locked = [IdleDesktopNative]::LockWorkStation() } catch { }
@@ -121,8 +129,73 @@ function Invoke-IdlePowerAction {
         "shutdown" {
             Start-Process -FilePath "shutdown.exe" -ArgumentList @("/s", "/t", "0") -WindowStyle Hidden
         }
-        default { shutdown.exe /h }
+        default {
+            Start-Process -FilePath "shutdown.exe" -ArgumentList @("/h") -WindowStyle Hidden
+        }
     }
+}
+
+function Get-SystemSleepCapabilities {
+    $info = [ordered]@{
+        classicSleep       = $false
+        modernStandby      = $false
+        hibernate          = $false
+        sleepAvailable     = $false
+        sleepSameAsHibernate = $false
+        hibernateAfterSec  = 0
+        noteKey            = $null
+        noteArgs           = @()
+    }
+    try {
+        $raw = powercfg.exe /a 2>&1 | Out-String
+        $parts = $raw -split '(?im)The following sleep states are not available'
+        $avail = $parts[0]
+        if ($avail -match '(?im)Standby \(S3\)') { $info.classicSleep = $true }
+        if ($avail -match '(?im)Standby \(S1\)') { $info.classicSleep = $true }
+        if ($avail -match '(?im)Standby \(S2\)') { $info.classicSleep = $true }
+        if ($avail -match '(?im)Standby \(S0') { $info.modernStandby = $true }
+        if ($avail -match '(?im)\bHibernate\b') { $info.hibernate = $true }
+    }
+    catch { }
+    $info.sleepAvailable = [bool]($info.classicSleep -or $info.modernStandby)
+    $info.sleepSameAsHibernate = (-not $info.sleepAvailable) -and [bool]$info.hibernate
+
+    try {
+        $q = powercfg.exe /q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE 2>&1 | Out-String
+        $ac = 0
+        $dc = 0
+        if ($q -match '(?im)Current AC Power Setting Index:\s*0x([0-9a-f]+)') {
+            $ac = [Convert]::ToInt64($Matches[1], 16)
+        }
+        if ($q -match '(?im)Current DC Power Setting Index:\s*0x([0-9a-f]+)') {
+            $dc = [Convert]::ToInt64($Matches[1], 16)
+        }
+        $onAc = $true
+        try { $onAc = Test-OnAc } catch { }
+        $info.hibernateAfterSec = if ($onAc) { [int]$ac } else { [int]$dc }
+    }
+    catch { }
+
+    if ($info.sleepSameAsHibernate) {
+        $info.noteKey = "SleepNoteSame"
+    }
+    elseif ([int]$info.hibernateAfterSec -gt 0) {
+        $info.noteKey = "SleepNoteHibernateAfter"
+        $info.noteArgs = @([int]$info.hibernateAfterSec)
+    }
+    elseif ($info.modernStandby -and -not $info.classicSleep) {
+        $info.noteKey = "SleepNoteModern"
+    }
+    return [pscustomobject]$info
+}
+
+function Get-SleepCapabilityNote {
+    $cap = Get-SystemSleepCapabilities
+    if (-not $cap.noteKey) { return $null }
+    if ($cap.noteArgs -and $cap.noteArgs.Count -gt 0) {
+        return (Get-UiText $cap.noteKey $cap.noteArgs)
+    }
+    return (Get-UiText $cap.noteKey)
 }
 
 $script:ScriptDir = $PSScriptRoot
@@ -197,6 +270,9 @@ $script:UiStrings = @{
         ActionMenu             = "Action: {0}"
         Hibernate              = "Hibernate"
         Sleep                  = "Sleep"
+        SleepNoteSame          = "Sleep ≈ Hibernate (no standby state)"
+        SleepNoteModern        = "No classic Sleep (S3); Modern Standby only"
+        SleepNoteHibernateAfter = "Windows Hibernate after {0}s (Sleep becomes Hibernate)"
         DisplayOff             = "Turn off display"
         Lock                   = "Lock"
         Shutdown               = "Shut down"
@@ -217,6 +293,7 @@ $script:UiStrings = @{
         DebugLastIdle          = "Debug last idle check"
         DebugMode              = "Debug mode"
         OpenDebugLog           = "Open dashboard"
+        ClearDebugDatabase     = "Clear database log ({0})"
         NoIdleChecksYet        = "No idle checks yet"
         Version                = "Version {0}"
         SourceHash             = "Source hash: {0}"
@@ -323,6 +400,9 @@ $script:UiStrings = @{
         ActionMenu             = "Actie: {0}"
         Hibernate              = "Slaapstand"
         Sleep                  = "Sluimerstand"
+        SleepNoteSame          = "Sleep ≈ Hibernate (geen standby)"
+        SleepNoteModern        = "Geen klassieke Sleep (S3); alleen Modern Standby"
+        SleepNoteHibernateAfter = "Windows Hibernate na {0}s (Sleep wordt Hibernate)"
         DisplayOff             = "Beeldscherm uitzetten"
         Lock                   = "Vergrendelen"
         Shutdown               = "Afsluiten"
@@ -343,6 +423,7 @@ $script:UiStrings = @{
         DebugLastIdle          = "Debug laatste idle-check"
         DebugMode              = "Debugmodus"
         OpenDebugLog           = "Dashboard openen"
+        ClearDebugDatabase     = "Databaselog wissen ({0})"
         NoIdleChecksYet        = "Nog geen idle-checks"
         Version                = "Versie {0}"
         SourceHash             = "Bronhash: {0}"
@@ -1804,7 +1885,10 @@ function Write-IdleDebugStatus {
     param($Evaluation, $Settings)
     if (Get-Command Add-DebugSample -ErrorAction SilentlyContinue) {
         Add-DebugSample -Evaluation $Evaluation
-        if ($Evaluation -and ($Evaluation.willProceed -or $Evaluation.willHibernate)) {
+        $result = $null
+        if ($Evaluation) { $result = [string](Get-ObjectProperty $Evaluation "result") }
+        $flush = ($result -eq "fired") -or ($result -eq "warn") -or ($Evaluation -and ($Evaluation.willProceed -or $Evaluation.willHibernate))
+        if ($flush) {
             if (Get-Command Save-DebugSampleBuffer -ErrorAction SilentlyContinue) {
                 Save-DebugSampleBuffer -Settings $Settings
             }
