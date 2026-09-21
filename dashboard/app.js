@@ -307,6 +307,36 @@ function versionHashHtml(r) {
   return `<span class="hash" title="${title}" style="color:${color}">${label}</span>`;
 }
 
+function metricHtml(value, limit) {
+  if (value == null || !Number.isFinite(value)) return "–";
+  const shown = Math.round(value);
+  const over = limit != null && Number.isFinite(limit) && value > limit;
+  return over ? `<span class="bad">${shown}</span>` : String(shown);
+}
+
+function quietSamplesHtml(r) {
+  const ratio = num(r.quiet_ratio);
+  const min = num(r.quiet_min_ratio);
+  if (ratio == null) return "–";
+  const pctNow = Math.round(ratio * 100);
+  if (min == null) return `${pctNow}%`;
+  const pctMin = Math.round(min * 100);
+  const low = ratio < min;
+  const text = `${pctNow}% / ${pctMin}%`;
+  return low ? `<span class="bad">${text}</span>` : text;
+}
+
+function quietWindowHtml(r) {
+  const sec = num(r.quiet_window_sec);
+  const need = num(r.quiet_window_need);
+  if (sec == null && need == null) return "–";
+  const a = sec == null ? "–" : Math.round(sec);
+  const b = need == null ? "–" : Math.round(need);
+  const short = need != null && sec != null && sec < need;
+  const text = `${a}/${b}s`;
+  return short ? `<span class="bad">${text}</span>` : text;
+}
+
 function sampleRowHtml(r) {
   const idleSec = num(r.idle_ms) != null ? Math.floor(num(r.idle_ms) / 1000) : "–";
   return `<tr>
@@ -315,11 +345,13 @@ function sampleRowHtml(r) {
       <td>${versionHashHtml(r)}</td>
       <td class="num">${idleSec}s ${met(r.idle_hit)}</td>
       <td>${met(r.quiet_met)}</td>
+      <td class="num">${quietSamplesHtml(r)}</td>
+      <td class="num">${quietWindowHtml(r)}</td>
       <td>${met(r.power_met)}</td>
       <td>${met(r.network_met)}</td>
-      <td class="num">${num(r.cpu_percent) == null ? "–" : Math.round(num(r.cpu_percent))}</td>
-      <td class="num">${num(r.disk_percent) == null ? "–" : Math.round(num(r.disk_percent))}</td>
-      <td class="num">${num(r.net_kbps) == null ? "–" : Math.round(num(r.net_kbps))}</td>
+      <td class="num">${metricHtml(num(r.cpu_percent), num(r.cpu_limit))}</td>
+      <td class="num">${metricHtml(num(r.disk_percent), num(r.disk_limit))}</td>
+      <td class="num">${metricHtml(num(r.net_kbps), num(r.net_limit_kbps))}</td>
       <td>${resultHtml(r)}</td>
     </tr>`;
 }
@@ -332,7 +364,7 @@ function renderTable() {
   if (!rows.length) {
     applyLastAction(null);
     $("table-meta").textContent = "no samples in this range";
-    body.innerHTML = `<tr><td class="empty" colspan="11">Debug mode writes samples into SQLite on a flush interval. Leave it on for a bit, then refresh.</td></tr>`;
+    body.innerHTML = `<tr><td class="empty" colspan="13">Debug mode writes samples into SQLite on a flush interval. Leave it on for a bit, then refresh.</td></tr>`;
     if (older) older.disabled = true;
     if (newer) newer.disabled = true;
     return;
