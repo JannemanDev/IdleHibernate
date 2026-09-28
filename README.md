@@ -26,7 +26,16 @@ wscript StartTray.vbs
 
 `StartTray.vbs` starts `IdleHibernateTray.ps1` from the same folder. It checks for PowerShell, the tray script, and `lib\Newtonsoft.Json.dll` / `lib\sqlite3.dll`, writes `%LOCALAPPDATA%\IdleHibernate\start-tray.log`, and shows a message with that log path (success, already running, or failure). Use `silent` or `delay` to skip the popup (restart uses `delay`).
 
-Only one tray instance runs at a time. Use **Restart tray icon** in the menu after you edit the scripts.
+To start, restart, or stop from a command prompt (no tray menu):
+
+```text
+Tray.cmd start
+Tray.cmd restart
+Tray.cmd stop
+Tray.cmd status
+```
+
+Only one tray instance runs at a time. Use **Restart tray icon** in the menu, or `Tray.cmd restart`, after you edit the scripts.
 
 To run at logon, put a shortcut to `StartTray.vbs` in the Startup folder (`shell:startup`).
 
