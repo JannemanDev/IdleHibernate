@@ -798,7 +798,7 @@ function Add-LiveMenuTextWidths {
     Add-MenuTextWidth $script:diskLimitLabel "disk" (Get-UiText DiskBusyAbove ([int]$cfg.diskBusyPercent) "100")
     Add-MenuTextWidth $script:netLimitLabel "net" (Get-UiText NetBusyAbove ([int]$cfg.netBusyKBps) "999999")
     $needSec = Get-IdleSecondsFromSettings -Settings $script:state
-    Add-MenuTextWidth $script:quietSamplesLabel "samples" (Get-UiText QuietSamplesRow 100 ([int][math]::Round(100.0 * [double]$cfg.minQuietRatio, 0)))
+    Add-MenuTextWidth $script:quietSamplesLabel "samples" (Get-UiText QuietSamplesRow 100 100)
     Add-MenuTextWidth $script:quietWindowLabel "window" (Get-UiText QuietWindowRow $needSec $needSec)
 }
 
@@ -1336,6 +1336,18 @@ $script:quietItem.Add_Click({
 })
 $script:quietSamplesLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText QuietSamplesRow "--" 90)
 $script:quietSamplesLabel.Enabled = $false
+$script:quietSamplesUp = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText IncreaseQuietMin)
+$script:quietSamplesDown = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText DecreaseQuietMin)
+$script:quietSamplesUp.Add_Click({
+    $script:keepMenuOpen = $true
+    Set-QuietMinRatio -Delta 1
+    Update-QuietLimitLabels
+})
+$script:quietSamplesDown.Add_Click({
+    $script:keepMenuOpen = $true
+    Set-QuietMinRatio -Delta -1
+    Update-QuietLimitLabels
+})
 $script:quietWindowLabel = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText QuietWindowRow 0 0)
 $script:quietWindowLabel.Enabled = $false
 $script:checkCpuItem = New-Object System.Windows.Forms.ToolStripMenuItem (Get-UiText CheckCpu)
@@ -1403,6 +1415,8 @@ $script:netLimitDown.Add_Click({
 })
 [void]$script:quietMenu.DropDownItems.Add($script:quietItem)
 [void]$script:quietMenu.DropDownItems.Add($script:quietSamplesLabel)
+[void]$script:quietMenu.DropDownItems.Add($script:quietSamplesUp)
+[void]$script:quietMenu.DropDownItems.Add($script:quietSamplesDown)
 [void]$script:quietMenu.DropDownItems.Add($script:quietWindowLabel)
 [void]$script:quietMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$script:quietMenu.DropDownItems.Add($script:checkCpuItem)
@@ -1789,6 +1803,8 @@ function Update-UiLanguage {
     if ($script:powerDcItem) { $script:powerDcItem.Text = Get-UiText PowerDc }
     if ($script:quietMenu) { $script:quietMenu.Text = Get-UiText QuietPc }
     if ($script:quietItem) { $script:quietItem.Text = Get-UiText RequireQuiet }
+    if ($script:quietSamplesUp) { $script:quietSamplesUp.Text = Get-UiText IncreaseQuietMin }
+    if ($script:quietSamplesDown) { $script:quietSamplesDown.Text = Get-UiText DecreaseQuietMin }
     if ($script:checkCpuItem) { $script:checkCpuItem.Text = Get-UiText CheckCpu }
     if ($script:cpuLimitUp) { $script:cpuLimitUp.Text = Get-UiText IncreaseCpu }
     if ($script:cpuLimitDown) { $script:cpuLimitDown.Text = Get-UiText DecreaseCpu }

@@ -42,7 +42,8 @@
                                       "minQuietRatio":  0.9,
                                       "cpuStepPercent":  5,
                                       "diskStepPercent":  5,
-                                      "netStepKBps":  10
+                                      "netStepKBps":  10,
+                                      "quietRatioStepPercent":  5
                                   }
                     },
     "chosen":  {

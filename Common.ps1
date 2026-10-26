@@ -260,6 +260,8 @@ $script:UiStrings = @{
         NetBusyAbove           = "Net busy above: {0} KB/s (now {1} KB/s)"
         QuietSamplesRow        = "Quiet samples: {0}% (min {1}%)"
         QuietWindowRow         = "Quiet window: {0}/{1} sec"
+        IncreaseQuietMin       = "(+) Increase quiet sample minimum"
+        DecreaseQuietMin       = "(-) Decrease quiet sample minimum"
         IncreaseCpu            = "(+) Increase CPU limit"
         DecreaseCpu            = "(-) Decrease CPU limit"
         IncreaseDisk           = "(+) Increase disk limit"
@@ -390,6 +392,8 @@ $script:UiStrings = @{
         NetBusyAbove           = "Net druk boven: {0} KB/s (nu {1} KB/s)"
         QuietSamplesRow        = "Stille samples: {0}% (min {1}%)"
         QuietWindowRow         = "Stille periode: {0}/{1} sec"
+        IncreaseQuietMin       = "(+) Minimum stille samples verhogen"
+        DecreaseQuietMin       = "(-) Minimum stille samples verlagen"
         IncreaseCpu            = "(+) CPU-limiet verhogen"
         DecreaseCpu            = "(-) CPU-limiet verlagen"
         IncreaseDisk           = "(+) Schijflimiet verhogen"
@@ -1047,16 +1051,17 @@ $script:LastIdleResetReason = $null
 
 function Get-DefaultQuietConfig {
     return [pscustomobject]@{
-        cpuBusyPercent  = 20.0
-        diskBusyPercent = 20.0
-        netBusyKBps     = 50.0
-        minQuietRatio   = 0.9
-        checkCpu        = $true
-        checkDisk       = $true
-        checkNet        = $true
-        cpuStepPercent  = 5
-        diskStepPercent = 5
-        netStepKBps     = 10
+        cpuBusyPercent        = 20.0
+        diskBusyPercent       = 20.0
+        netBusyKBps           = 50.0
+        minQuietRatio         = 0.8
+        checkCpu              = $true
+        checkDisk             = $true
+        checkNet              = $true
+        cpuStepPercent        = 5
+        diskStepPercent       = 5
+        netStepKBps           = 10
+        quietRatioStepPercent = 5
     }
 }
 
@@ -1073,12 +1078,15 @@ function Apply-QuietDoc {
     if ($null -ne $Doc.cpuStepPercent) { $Cfg.cpuStepPercent = [int]$Doc.cpuStepPercent }
     if ($null -ne $Doc.diskStepPercent) { $Cfg.diskStepPercent = [int]$Doc.diskStepPercent }
     if ($null -ne $Doc.netStepKBps) { $Cfg.netStepKBps = [int]$Doc.netStepKBps }
+    if ($null -ne $Doc.quietRatioStepPercent) { $Cfg.quietRatioStepPercent = [int]$Doc.quietRatioStepPercent }
     if ($Cfg.cpuStepPercent -lt 1) { $Cfg.cpuStepPercent = 1 }
     if ($Cfg.cpuStepPercent -gt 50) { $Cfg.cpuStepPercent = 50 }
     if ($Cfg.diskStepPercent -lt 1) { $Cfg.diskStepPercent = 1 }
     if ($Cfg.diskStepPercent -gt 50) { $Cfg.diskStepPercent = 50 }
     if ($Cfg.netStepKBps -lt 1) { $Cfg.netStepKBps = 1 }
     if ($Cfg.netStepKBps -gt 200) { $Cfg.netStepKBps = 200 }
+    if ($Cfg.quietRatioStepPercent -lt 1) { $Cfg.quietRatioStepPercent = 1 }
+    if ($Cfg.quietRatioStepPercent -gt 50) { $Cfg.quietRatioStepPercent = 50 }
     return $Cfg
 }
 
@@ -1127,6 +1135,19 @@ function Set-QuietBusyLimit {
     else {
         $cfg.netBusyKBps = [math]::Min(2000, [math]::Max(5, [int]$cfg.netBusyKBps + $step))
     }
+    $script:QuietConfig = $cfg
+    Save-QuietConfig
+}
+
+function Set-QuietMinRatio {
+    param([int]$Delta)
+    $cfg = Get-QuietConfig
+    $step = [int]$cfg.quietRatioStepPercent
+    if ($step -lt 1) { $step = 5 }
+    if ($Delta -lt 0) { $step = -$step }
+    $pct = [int][math]::Round(100.0 * [double]$cfg.minQuietRatio, 0)
+    $pct = [math]::Min(100, [math]::Max(5, $pct + $step))
+    $cfg.minQuietRatio = [math]::Round($pct / 100.0, 2)
     $script:QuietConfig = $cfg
     Save-QuietConfig
 }
@@ -1631,9 +1652,10 @@ function Write-AppSettingsFile {
     $language = Get-UiLanguageCode -Settings $(if ($State) { $State } else { $doc })
 
     $defQuiet = [ordered]@{
-        cpuStepPercent  = [int]$cfg.cpuStepPercent
-        diskStepPercent = [int]$cfg.diskStepPercent
-        netStepKBps     = [int]$cfg.netStepKBps
+        cpuStepPercent        = [int]$cfg.cpuStepPercent
+        diskStepPercent       = [int]$cfg.diskStepPercent
+        netStepKBps           = [int]$cfg.netStepKBps
+        quietRatioStepPercent = [int]$cfg.quietRatioStepPercent
     }
     $definitions = [ordered]@{
         network             = [pscustomobject]$network
